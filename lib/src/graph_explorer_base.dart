@@ -1144,12 +1144,6 @@ extension IterableOfListNodeExtension<T> on Iterable<List<Node<T>>> {
   List<List<String>> toListOfStringPaths() =>
       map((e) => e.toListOfString()).toList();
 
-  /*
-  asasd() {
-    ASCIIArtTree.fr
-  }
-   */
-
   /// Dispose the graph of all the [Node] paths.
   void disposeGraph() {
     for (var e in this) {
