@@ -8,7 +8,7 @@ environment:
 
 dependencies:
   ascii_art_tree: ^1.0.5
-  path: ^1.8.3
+  collection: ^1.17.0
 
 dev_dependencies:
   lints: ^1.0.1
