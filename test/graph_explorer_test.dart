@@ -72,10 +72,82 @@ void main() {
   });
 
   group('Graph', () {
+    test('toJson/fromJson', () async {
+      var graph = Graph<String>();
+
+      graph.node('a').getOrAddOutput('b')
+        ..addOutput('c')
+        ..addOutput('d');
+
+      graph.node('c').addOutput('f');
+      graph.node('d').getOrAddOutput('e').addOutput('f');
+
+      expect(graph.roots.toListOfString(), equals(['a']));
+      expect(graph.allNodes.toListOfString(),
+          equals(['a', 'b', 'c', 'd', 'f', 'e']));
+      expect(graph.allLeaves.toListOfString(), equals(['f']));
+
+      var json = graph.toJson();
+
+      expect(
+          json,
+          equals({
+            'a': {
+              'b': {
+                'c': {'f': {}},
+                'd': {
+                  'e': {'f': 'f'}
+                }
+              }
+            }
+          }));
+
+      var graph2 = Graph.fromJson(json);
+
+      expect(graph2.roots.toListOfString(), equals(['a']));
+      expect(graph2.allNodes.toListOfString(),
+          equals(['a', 'b', 'c', 'd', 'f', 'e']));
+
+      expect(graph2.toJson(), equals(json));
+    });
+
+    test('allPath', () async {
+      var graph = Graph<String>();
+
+      graph.node('a').getOrAddOutput('b')
+        ..addOutput('c')
+        ..addOutput('d');
+
+      graph.node('c').addOutput('f');
+      graph.node('d').getOrAddOutput('e').addOutput('f');
+
+      expect(graph.roots.toListOfString(), equals(['a']));
+      expect(graph.allNodes.toListOfString(),
+          equals(['a', 'b', 'c', 'd', 'f', 'e']));
+      expect(graph.allLeaves.toListOfString(), equals(['f']));
+
+      print(graph.toASCIIArtTree().generate());
+
+      var paths = await graph.allPaths;
+      expect(
+          paths.toListOfStringPaths(),
+          equals([
+            ['a', 'b', 'c', 'f'],
+            ['a', 'b', 'd', 'e', 'f']
+          ]));
+
+      var shortestPaths = await graph.shortestPaths;
+      expect(
+          shortestPaths.toListOfStringPaths(),
+          equals([
+            ['a', 'b', 'c', 'f']
+          ]));
+    });
+
     test('scanPathsFrom 1', () async {
       var graph = Graph<String>();
 
-      expect(graph.allNodes.keys, isEmpty);
+      expect(graph.allNodes, isEmpty);
       expect(graph.isEmpty, isTrue);
       expect(graph.isNotEmpty, isFalse);
       expect(graph.length, equals(0));
@@ -151,7 +223,8 @@ void main() {
       graph.node('c').addOutput('f');
       graph.node('d').getOrAddOutput('e').addOutput('f');
 
-      expect(graph.allNodes.keys, equals(['a', 'b', 'c', 'd', 'f', 'e']));
+      expect(graph.allNodes.toListOfString(),
+          equals(['a', 'b', 'c', 'd', 'f', 'e']));
 
       expect(graph.node('a').inputs, equals([]));
       expect(graph.node('a').outputs.toListOfString(), equals(['b']));
