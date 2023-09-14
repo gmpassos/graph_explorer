@@ -333,7 +333,6 @@ class Graph<T> implements NodeIO<T> {
           if (jsonNode != null && (jsonNode is! Map && jsonNode is! String)) {
             throw StateError("Invalid node type> $nodeValue: $jsonNode");
           }
-
           node.attachment = jsonNode;
         } else if (!identical(jsonNode, nodeAttachment)) {
           if (jsonNode is Map) {
@@ -347,7 +346,7 @@ class Graph<T> implements NodeIO<T> {
               throw StateError(
                   "Invalid node reference: $nodeValue -> $jsonNode");
             }
-          } else {
+          } else if (jsonNode != null) {
             throw StateError(
                 "Invalid node type (graph)> $nodeValue: $jsonNode");
           }
