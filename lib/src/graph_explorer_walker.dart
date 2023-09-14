@@ -309,6 +309,8 @@ class GraphWalker<T> {
               }
             } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
               processed[node] = ret.count;
+            } else {
+              return _resolveWalkProcessReturn<T, R>(node, ret);
             }
           }
         }
@@ -375,6 +377,8 @@ class GraphWalker<T> {
               }
             } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
               processed[node] = ret.count;
+            } else {
+              return _resolveWalkProcessReturn<T, R>(node, ret);
             }
           }
         }
@@ -435,6 +439,8 @@ class GraphWalker<T> {
               }
             } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
               processed[node] = ret.count;
+            } else {
+              return _resolveWalkProcessReturn<T, R>(node, ret);
             }
           }
         }
@@ -489,6 +495,8 @@ class GraphWalker<T> {
               }
             } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
               processed[node] = ret.count;
+            } else {
+              return _resolveWalkProcessReturn<T, R>(node, ret);
             }
           }
         }
