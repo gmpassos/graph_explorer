@@ -30,10 +30,6 @@ void main() async {
 
   print('\nGraph to Tree:');
   print(_encodeJsonPretty(tree));
-
-  var asciiArtTree = graph.toASCIIArtTree();
-  print('\nGraph to ASCII Art Tree:');
-  print(asciiArtTree.generate());
 }
 
 String _encodeJsonPretty(dynamic json) =>
@@ -54,7 +50,7 @@ String _encodeJsonPretty(dynamic json) =>
 //   "a": {
 //     "b": {
 //       "c": {
-//         "f": {}
+//         "f": null
 //       },
 //       "d": {
 //         "e": {
@@ -64,13 +60,4 @@ String _encodeJsonPretty(dynamic json) =>
 //     }
 //   }
 // }
-//
-// Graph to ASCII Art Tree:
-// a
-// └─┬─ b
-//   ├─┬─ c
-//   │ └──> f
-//   └─┬─ d
-//     └─┬─ e
-//       └──> f ººº
 //

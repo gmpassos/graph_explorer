@@ -94,7 +94,7 @@ void main() {
           equals({
             'a': {
               'b': {
-                'c': {'f': {}},
+                'c': {'f': null},
                 'd': {
                   'e': {'f': 'f'}
                 }
@@ -102,13 +102,169 @@ void main() {
             }
           }));
 
+      expect(graph.getNode('b')?.isInput('a'), isTrue);
+      expect(graph.getNode('b')?.isInput('0'), isFalse);
+      expect(graph.getNode('b')?.isInput('b'), isFalse);
+
+      expect(graph.getNode('b')?.isOutput('c'), isTrue);
+      expect(graph.getNode('b')?.isOutput('d'), isTrue);
+      expect(graph.getNode('b')?.isOutput('x'), isFalse);
+      expect(graph.getNode('b')?.isOutput('b'), isFalse);
+
+      expect(graph.getNode('b')?.outputsInDepth().toListOfString(),
+          equals(['c', 'f', 'd', 'e']));
+
+      expect(graph.getNode('b')?.outputsInDepth(bfs: true).toListOfString(),
+          equals(['c', 'd', 'f', 'e']));
+
+      expect(
+          graph.getNode('c')?.outputsInDepth().toListOfString(), equals(['f']));
+
+      expect(graph.getNode('d')?.outputsInDepth().toListOfString(),
+          equals(['e', 'f']));
+
+      expect(
+          graph.getNode('b')?.inputsInDepth().toListOfString(), equals(['a']));
+
+      expect(graph.getNode('c')?.inputsInDepth().toListOfString(),
+          equals(['b', 'a']));
+
+      expect(graph.getNode('d')?.inputsInDepth().toListOfString(),
+          equals(['b', 'a']));
+
+      expect(graph.getNode('f')?.inputsInDepth().toListOfString(),
+          equals(['c', 'b', 'a', 'e', 'd']));
+
+      expect(graph.getNode('f')?.inputsInDepth(bfs: true).toListOfString(),
+          equals(['c', 'e', 'b', 'd', 'a']));
+
+      expect(
+          graph
+              .getNode('c')
+              ?.outputsInDepthIntersection(graph.getNode('d'))
+              .toListOfString(),
+          equals(['f']));
+
+      expect(
+          graph
+              .getNode('c')
+              ?.inputsInDepthIntersection(graph.getNode('d'))
+              .toListOfString(),
+          equals(['b', 'a']));
+
       var graph2 = Graph.fromJson(json);
 
       expect(graph2.roots.toListOfString(), equals(['a']));
       expect(graph2.allNodes.toListOfString(),
-          equals(['a', 'b', 'c', 'd', 'f', 'e']));
+          unorderedEquals(['a', 'b', 'c', 'd', 'f', 'e']));
 
       expect(graph2.toJson(), equals(json));
+
+      {
+        var walk = <String>[];
+
+        graph.walkOutputsFrom(['a'], (step) => walk.add(step.nodeValue));
+
+        expect(walk, equals(['a', 'b', 'c', 'f', 'd', 'e']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkOutputsFrom(['a'], (step) => walk.add(step.nodeValue),
+            bfs: true);
+
+        expect(walk, equals(['a', 'b', 'c', 'd', 'f', 'e']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkOutputsFrom(['a'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('d'));
+
+        expect(walk, equals(['a', 'b', 'c', 'f', 'd']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkOutputsFrom(['a'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('d'), bfs: true);
+
+        expect(walk, equals(['a', 'b', 'c', 'd']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkOutputsFrom(['a'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('d'), processRoots: false);
+
+        expect(walk, equals(['b', 'c', 'f', 'd']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkOutputsFrom(['a'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('d'), processRoots: false, bfs: true);
+
+        expect(walk, equals(['b', 'c', 'd']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkInputsFrom(['f'], (step) => walk.add(step.nodeValue));
+
+        expect(walk, equals(['f', 'c', 'b', 'a', 'e', 'd']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkInputsFrom(['f'], (step) => walk.add(step.nodeValue),
+            bfs: true);
+
+        expect(walk, equals(['f', 'c', 'e', 'b', 'd', 'a']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkInputsFrom(['f'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('b'));
+
+        expect(walk, equals(['f', 'c', 'b']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkInputsFrom(['f'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('b'), bfs: true);
+
+        expect(walk, equals(['f', 'c', 'e', 'b']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkInputsFrom(['f'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('b'), processRoots: false);
+
+        expect(walk, equals(['c', 'b']));
+      }
+
+      {
+        var walk = <String>[];
+
+        graph.walkInputsFrom(['f'], (step) => walk.add(step.nodeValue),
+            stopMatcher: NodeEquals('b'), processRoots: false, bfs: true);
+
+        expect(walk, equals(['c', 'e', 'b']));
+      }
     });
 
     test('allPath', () async {
@@ -125,8 +281,6 @@ void main() {
       expect(graph.allNodes.toListOfString(),
           equals(['a', 'b', 'c', 'd', 'f', 'e']));
       expect(graph.allLeaves.toListOfString(), equals(['f']));
-
-      print(graph.toASCIIArtTree().generate());
 
       var paths = await graph.allPaths;
       expect(
@@ -188,8 +342,8 @@ void main() {
               equals({
                 'a': {
                   'b': {
-                    'c': {},
-                    'd': {},
+                    'c': null,
+                    'd': null,
                   },
                 }
               })));
@@ -201,8 +355,8 @@ void main() {
               equals({
                 graph.node('a'): {
                   graph.node('b'): {
-                    graph.node('c'): {},
-                    graph.node('d'): {},
+                    graph.node('c'): null,
+                    graph.node('d'): null,
                   },
                 }
               })));
@@ -214,8 +368,8 @@ void main() {
               equals({
                 graph.node('a'): {
                   graph.node('b'): {
-                    graph.node('c'): {},
-                    graph.node('d'): {},
+                    graph.node('c'): null,
+                    graph.node('d'): null,
                   },
                 }
               })));
@@ -254,7 +408,7 @@ void main() {
           equals({
             'a': {
               'b': {
-                'c': {'f': {}},
+                'c': {'f': null},
                 'd': {
                   'e': {'f': 'f'},
                 },
@@ -266,7 +420,7 @@ void main() {
           graph.toTreeFrom(['b']),
           equals({
             'b': {
-              'c': {'f': {}},
+              'c': {'f': null},
               'd': {
                 'e': {'f': 'f'},
               },
