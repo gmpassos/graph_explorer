@@ -170,13 +170,13 @@ class GraphScanner<T> {
       {Graph<T>? graph, NodesProvider<T>? outputsProvider}) async {
     var initTime = DateTime.now();
 
-    bool? processTarget(GraphNodeStep<T> step) {
+    GraphWalkingInstruction<bool>? processTarget(GraphNodeStep<T> step) {
       var node = step.node;
 
       if (targetMatcher.matchesNode(node)) {
         node.markAsTarget();
         if (!findAll) {
-          return true;
+          return GraphWalkingInstruction.stop();
         }
       }
       return null;
@@ -541,21 +541,22 @@ class Graph<T> implements NodeIO<T> {
   /// Populates this graph with [entries].
   /// - [inputsProvider]: provides the inputs of an entry.
   /// - [outputsProvider]: provides the outputs of an entry.
-  void populate(
+  R? populate<R>(
     Iterable<T> entries, {
     GraphWalkNodeProvider<T>? nodeProvider,
     GraphWalkOutputsProvider<T>? inputsProvider,
     GraphWalkOutputsProvider<T>? outputsProvider,
-    bool? Function(GraphNodeStep<T> step, Node<T> node)? process,
+    GraphWalkNodeProcessor<T, R>? process,
+    int maxExpansion = 3,
     bool bfs = false,
   }) {
     nodeProvider ??= (s, e) => this.node(e);
     inputsProvider ??= (s, e) => [];
     outputsProvider ??= (s, e) => [];
 
-    GraphWalker<T>(
-      maxExpansion: 3,
-    ).walk<bool>(
+    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: bfs);
+
+    return graphWalker.walk<R>(
       entries,
       nodeProvider: nodeProvider,
       outputsProvider: outputsProvider,
@@ -573,31 +574,32 @@ class Graph<T> implements NodeIO<T> {
           node.addInput(dep);
         }
 
-        if (process != null) {
-          var stop = process(step, node);
-          if (stop != null && stop) {
-            return true;
-          }
+        if (process == null) {
+          return null;
         }
 
-        return null;
+        var ret = process(step);
+        return ret;
       },
     );
   }
 
-  Future<void> populateAsync(
+  Future<R?> populateAsync<R>(
     Iterable<T> entries, {
-    GraphWalkNodeProvider<T>? nodeProvider,
+    GraphWalkNodeProviderAsync<T>? nodeProvider,
     GraphWalkOutputsProviderAsync<T>? inputsProvider,
     GraphWalkOutputsProviderAsync<T>? outputsProvider,
-    GraphWalkNodeProcessor<T>? process,
+    GraphWalkNodeProcessorAsync<T, R>? process,
+    int maxExpansion = 3,
     bool bfs = false,
   }) async {
     nodeProvider ??= (s, e) => this.node(e);
     inputsProvider ??= (s, e) => [];
     outputsProvider ??= (s, e) => [];
 
-    await GraphWalker<T>().walkAsync<bool>(
+    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: bfs);
+
+    return graphWalker.walkAsync<R>(
       entries,
       nodeProvider: nodeProvider,
       outputsProvider: outputsProvider,
@@ -619,16 +621,16 @@ class Graph<T> implements NodeIO<T> {
           return null;
         }
 
-        var stop = await process(step);
-        return stop;
+        var ret = await process(step);
+        return ret;
       },
     );
   }
 
   /// Walk the graph nodes outputs starting [from] and stopping at [stopMatcher] (if provided).
-  void walkOutputsFrom(
+  R? walkOutputsFrom<R>(
     Iterable<T> from,
-    GraphWalkNodeProcessor<T> process, {
+    GraphWalkNodeProcessor<T, R> process, {
     NodeMatcher<T>? stopMatcher,
     bool processRoots = true,
     int maxExpansion = 1,
@@ -637,27 +639,29 @@ class Graph<T> implements NodeIO<T> {
       GraphWalker<T>(
         stopMatcher: stopMatcher,
         processRoots: processRoots,
-        bfs: bfs,
         maxExpansion: maxExpansion,
-      ).walkByNodes<bool>(
+        bfs: bfs,
+      ).walkByNodes<R>(
         valuesToNodes(from),
         process: process,
         outputsProvider: (step, node) => node._outputs,
       );
 
   /// Walk the graph nodes inputs starting [from] and stopping at [stopMatcher] (if provided).
-  void walkInputsFrom(
+  R? walkInputsFrom<R>(
     Iterable<T> from,
-    GraphWalkNodeProcessor<T> process, {
+    GraphWalkNodeProcessor<T, R> process, {
     NodeMatcher<T>? stopMatcher,
     bool processRoots = true,
+    int maxExpansion = 1,
     bool bfs = false,
   }) =>
       GraphWalker<T>(
         stopMatcher: stopMatcher,
         processRoots: processRoots,
+        maxExpansion: maxExpansion,
         bfs: bfs,
-      ).walkByNodes<bool>(
+      ).walkByNodes<R>(
         valuesToNodes(from),
         process: process,
         outputsProvider: (step, node) => node._inputs,
@@ -921,12 +925,15 @@ class Node<T> extends NodeIO<T> {
   bool isInputNode(Node<T> target) {
     if (this == target) return false;
 
-    return GraphWalker<T>(
-          stopMatcher: NodeEquals<T>(target.value),
-        ).walkByNodes<bool>(
+    var graphWalker = GraphWalker<T>(
+      stopMatcher: NodeEquals<T>(target.value),
+    );
+
+    return graphWalker.walkByNodes<bool>(
           [this],
           outputsProvider: (step, node) => node._inputs,
-          process: (step) => step.node == target,
+          process: (step) =>
+              step.node == target ? GraphWalkingInstruction.result(true) : null,
         ) ??
         false;
   }
@@ -938,26 +945,35 @@ class Node<T> extends NodeIO<T> {
   bool isOutputNode(Node<T> target) {
     if (this == target) return false;
 
-    return GraphWalker(
+    var graphWalker = GraphWalker<T>(
       stopMatcher: NodeEquals<T>(target.value),
-    ).walkByNodes(
-      [this],
-      outputsProvider: (step, node) => node._outputs,
-      process: (step) => step.node == target,
     );
+
+    return graphWalker.walkByNodes<bool>(
+          [this],
+          outputsProvider: (step, node) => node._outputs,
+          process: (step) =>
+              step.node == target ? GraphWalkingInstruction.result(true) : null,
+        ) ??
+        false;
   }
 
   /// Returns all the [outputs] in depth, scanning all the [outputs] of [outputs].
   List<Node<T>> outputsInDepth({bool bfs = false}) {
     final allNodes = <Node<T>>[];
 
-    GraphWalker<T>(
+    var graphWalker = GraphWalker<T>(
       processRoots: false,
       bfs: bfs,
-    ).walkByNodes<bool>(
+    );
+
+    graphWalker.walkByNodes<bool>(
       [this],
       outputsProvider: (step, node) => node._outputs,
-      process: (step) => allNodes.add(step.node),
+      process: (step) {
+        allNodes.add(step.node);
+        return null;
+      },
     );
 
     return allNodes;
@@ -967,13 +983,18 @@ class Node<T> extends NodeIO<T> {
   List<Node<T>> inputsInDepth({bool bfs = false}) {
     final allNodes = <Node<T>>[];
 
-    GraphWalker<T>(
+    var graphWalker = GraphWalker<T>(
       processRoots: false,
       bfs: bfs,
-    ).walkByNodes<bool>(
+    );
+
+    graphWalker.walkByNodes<bool>(
       [this],
       outputsProvider: (step, node) => node._inputs,
-      process: (step) => allNodes.add(step.node),
+      process: (step) {
+        allNodes.add(step.node);
+        return null;
+      },
     );
 
     return allNodes;
@@ -1020,7 +1041,9 @@ class Node<T> extends NodeIO<T> {
     final computingPathsIdxRet = <int>[0];
     var expandCursor = 0;
 
-    var shortestPath = GraphWalker<T>().walkByNodes<List<Node<T>>>(
+    var graphWalker = GraphWalker<T>();
+
+    var shortestPath = graphWalker.walkByNodes<List<Node<T>>>(
       [this],
       outputsProvider: (step, node) {
         var inputs = node._inputs;
@@ -1039,7 +1062,7 @@ class Node<T> extends NodeIO<T> {
         if (node.isRoot) {
           // [computingPaths] of [node] completed.
           // Return one of the shortest path (1st):
-          return computingPaths.first;
+          return GraphWalkingInstruction.result(computingPaths.first);
         }
 
         // In a BFS the 1st input will be one of the closest to root,
@@ -1077,9 +1100,9 @@ class Node<T> extends NodeIO<T> {
     final computingPathsIdxRet = <int>[0];
     var expandCursor = 0;
 
-    GraphWalker<T>(
-      maxExpansion: 3,
-    ).walkByNodes<List<Node<T>>>(
+    var graphWalker = GraphWalker<T>(maxExpansion: 3);
+
+    graphWalker.walkByNodes<List<Node<T>>>(
       [this],
       outputsProvider: (step, node) => node._inputs,
       process: (step) {
@@ -1104,7 +1127,7 @@ class Node<T> extends NodeIO<T> {
 
           // Allow independent branches to be computed:
           // Reset counter to 0:
-          return 0;
+          return GraphWalkingInstruction.setExpansionCounter(0);
         }
 
         final processed = step.processed;

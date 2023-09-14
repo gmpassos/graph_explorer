@@ -164,7 +164,13 @@ class GraphNodeStep<T> extends GraphStep<T> {
 typedef GraphWalkNodeProvider<T> = Node<T>? Function(
     GraphStep<T> step, T nodeValue);
 
-typedef GraphWalkNodeProcessor<T> = dynamic Function(GraphNodeStep<T> step);
+typedef GraphWalkNodeProviderAsync<T> = FutureOr<Node<T>?> Function(
+    GraphStep<T> step, T nodeValue);
+
+typedef GraphWalkNodeProcessor<T, R> = Object? Function(GraphNodeStep<T> step);
+
+typedef GraphWalkNodeProcessorAsync<T, R> = FutureOr<Object?> Function(
+    GraphNodeStep<T> step);
 
 typedef GraphWalkNodeOutputsProvider<T> = Iterable<Node<T>>? Function(
     GraphNodeStep<T> step, Node<T> node);
@@ -178,9 +184,44 @@ typedef GraphWalkOutputsProvider<T> = Iterable<T>? Function(
 typedef GraphWalkOutputsProviderAsync<T> = FutureOr<Iterable<T>?> Function(
     GraphNodeStep<T> step, T nodeValue);
 
-enum GraphWalking {
+class GraphWalkingInstruction<R> {
+  GraphWalkingInstruction();
+
+  factory GraphWalkingInstruction.result(R? result) =>
+      GraphWalkingInstructionResult(result);
+
+  factory GraphWalkingInstruction.stop() =>
+      GraphWalkingInstructionOperation(GraphWalkingOperation.stop);
+
+  factory GraphWalkingInstruction.next() =>
+      GraphWalkingInstructionOperation(GraphWalkingOperation.next);
+
+  factory GraphWalkingInstruction.setExpansionCounter(int count) =>
+      GraphWalkingInstructionSetExpansionCounter(count);
+}
+
+enum GraphWalkingOperation {
   stop,
   next,
+}
+
+class GraphWalkingInstructionOperation<R> extends GraphWalkingInstruction<R> {
+  final GraphWalkingOperation operation;
+
+  GraphWalkingInstructionOperation(this.operation);
+}
+
+class GraphWalkingInstructionResult<R> extends GraphWalkingInstruction<R> {
+  final R? result;
+
+  GraphWalkingInstructionResult(this.result);
+}
+
+class GraphWalkingInstructionSetExpansionCounter<R>
+    extends GraphWalkingInstruction<R> {
+  final int count;
+
+  GraphWalkingInstructionSetExpansionCounter(this.count);
 }
 
 /// [Graph] walker algorithms.
@@ -230,7 +271,7 @@ class GraphWalker<T> {
     Iterable<T> from, {
     required GraphWalkNodeProvider<T> nodeProvider,
     required GraphWalkOutputsProvider<T> outputsProvider,
-    required GraphWalkNodeProcessor<T> process,
+    required GraphWalkNodeProcessor<T, R> process,
   }) {
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
@@ -257,19 +298,17 @@ class GraphWalker<T> {
           var ret = process(step);
 
           if (ret != null) {
-            if (ret is GraphWalking) {
-              switch (ret) {
-                case GraphWalking.stop:
+            if (ret is GraphWalkingInstructionResult) {
+              return ret.result as R?;
+            } else if (ret is GraphWalkingInstructionOperation) {
+              switch (ret.operation) {
+                case GraphWalkingOperation.stop:
                   return null;
-                case GraphWalking.next:
+                case GraphWalkingOperation.next:
                   continue;
               }
-            } else if (ret is bool) {
-              if (ret) {
-                return _resolveWalkProcessReturn<T, R>(node, ret);
-              }
-            } else {
-              return _resolveWalkProcessReturn<T, R>(node, ret);
+            } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
+              processed[node] = ret.count;
             }
           }
         }
@@ -296,9 +335,9 @@ class GraphWalker<T> {
   /// A generic walk algorithm.
   Future<R?> walkAsync<R>(
     Iterable<T> from, {
-    required GraphWalkNodeProvider<T> nodeProvider,
+    required GraphWalkNodeProviderAsync<T> nodeProvider,
     required GraphWalkOutputsProviderAsync<T> outputsProvider,
-    required GraphWalkNodeProcessor<T> process,
+    required GraphWalkNodeProcessorAsync<T, R> process,
   }) async {
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
@@ -306,7 +345,7 @@ class GraphWalker<T> {
     for (var rootValue in from) {
       var rootStepValue = GraphValueStep(this, null, rootValue);
 
-      final rootNode = nodeProvider(rootStepValue, rootValue) ??
+      final rootNode = await nodeProvider(rootStepValue, rootValue) ??
           (throw StateError("Can't find root node: $rootValue"));
 
       var rootStep = GraphNodeStep(this, null, rootNode);
@@ -325,19 +364,17 @@ class GraphWalker<T> {
           var ret = await process(step);
 
           if (ret != null) {
-            if (ret is GraphWalking) {
-              switch (ret) {
-                case GraphWalking.stop:
+            if (ret is GraphWalkingInstructionResult) {
+              return ret.result as R?;
+            } else if (ret is GraphWalkingInstructionOperation) {
+              switch (ret.operation) {
+                case GraphWalkingOperation.stop:
                   return null;
-                case GraphWalking.next:
+                case GraphWalkingOperation.next:
                   continue;
               }
-            } else if (ret is bool) {
-              if (ret) {
-                return _resolveWalkProcessReturn<T, R>(node, ret);
-              }
-            } else {
-              return _resolveWalkProcessReturn<T, R>(node, ret);
+            } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
+              processed[node] = ret.count;
             }
           }
         }
@@ -350,10 +387,11 @@ class GraphWalker<T> {
         if (outputs != null) {
           var outputsNodes = outputs.map((v) {
             var nodeStepValue = GraphValueStep(this, step, v);
-            return nodeProvider(nodeStepValue, v)!;
+            return nodeProvider(nodeStepValue, v);
           });
 
-          queue.addAllToScanQueue(outputsNodes.toGraphNodeStep(step), bfs);
+          queue.addAllToScanQueue(
+              await outputsNodes.toGraphNodeStepAsync(step), bfs);
         }
       }
     }
@@ -365,7 +403,7 @@ class GraphWalker<T> {
   R? walkByNodes<R>(
     Iterable<Node<T>> from, {
     required GraphWalkNodeOutputsProvider<T> outputsProvider,
-    required GraphWalkNodeProcessor<T> process,
+    required GraphWalkNodeProcessor<T, R> process,
   }) {
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
@@ -386,21 +424,17 @@ class GraphWalker<T> {
           var ret = process(step);
 
           if (ret != null) {
-            if (ret is GraphWalking) {
-              switch (ret) {
-                case GraphWalking.stop:
+            if (ret is GraphWalkingInstructionResult) {
+              return ret.result as R?;
+            } else if (ret is GraphWalkingInstructionOperation) {
+              switch (ret.operation) {
+                case GraphWalkingOperation.stop:
                   return null;
-                case GraphWalking.next:
+                case GraphWalkingOperation.next:
                   continue;
               }
-            } else if (ret is bool) {
-              if (ret) {
-                return _resolveWalkProcessReturn<T, R>(node, ret);
-              }
-            } else if (ret is int) {
-              processed[node] = ret;
-            } else {
-              return _resolveWalkProcessReturn<T, R>(node, ret);
+            } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
+              processed[node] = ret.count;
             }
           }
         }
@@ -423,7 +457,7 @@ class GraphWalker<T> {
   Future<R?> walkByNodesAsync<R>(
     Iterable<Node<T>> from, {
     required GraphWalkNodeOutputsProviderAsync<T> outputsProvider,
-    required GraphWalkNodeProcessor<T> process,
+    required GraphWalkNodeProcessorAsync<T, R> process,
   }) async {
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
@@ -444,21 +478,17 @@ class GraphWalker<T> {
           var ret = await process(step);
 
           if (ret != null) {
-            if (ret is GraphWalking) {
-              switch (ret) {
-                case GraphWalking.stop:
+            if (ret is GraphWalkingInstructionResult) {
+              return ret.result as R?;
+            } else if (ret is GraphWalkingInstructionOperation) {
+              switch (ret.operation) {
+                case GraphWalkingOperation.stop:
                   return null;
-                case GraphWalking.next:
+                case GraphWalkingOperation.next:
                   continue;
               }
-            } else if (ret is bool) {
-              if (ret) {
-                return _resolveWalkProcessReturn<T, R>(node, ret);
-              }
-            } else if (ret is int) {
-              processed[node] = ret;
-            } else {
-              return _resolveWalkProcessReturn<T, R>(node, ret);
+            } else if (ret is GraphWalkingInstructionSetExpansionCounter) {
+              processed[node] = ret.count;
             }
           }
         }
@@ -577,14 +607,6 @@ class GraphWalker<T> {
   }
 }
 
-extension _ToGraphNodeStepIterableExtension<T> on Iterable<Node<T>> {
-  Iterable<GraphNodeStep<T>> toGraphNodeStep(GraphNodeStep<T> previous) =>
-      map((node) => GraphNodeStep<T>(previous.walker, previous, node));
-
-  Iterable<GraphNodeStep<T>> toGraphRootStep(GraphWalker<T> walker) =>
-      map((node) => GraphNodeStep<T>(walker, null, node));
-}
-
 extension _MapOfIntExtension<K> on Map<K, int> {
   int increment(K key) => update(key, (count) => count + 1, ifAbsent: () => 1);
 }
@@ -593,6 +615,56 @@ extension _ListTypeExtension<T> on List<T> {
   Type get genericType => T;
 
   List<T> toReversedList() => reversed.toList();
+}
+
+extension _ToGraphNodeStepIterableExtension<T> on Iterable<Node<T>> {
+  Iterable<GraphNodeStep<T>> toGraphRootStep(GraphWalker<T> walker) =>
+      map((node) => GraphNodeStep<T>(walker, null, node));
+
+  Iterable<GraphNodeStep<T>> toGraphNodeStep(GraphNodeStep<T> previous) =>
+      map((node) => GraphNodeStep<T>(previous.walker, previous, node));
+}
+
+extension _ToGraphNodeStepIterableAsyncExtension<T>
+    on Iterable<FutureOr<Node<T>?>> {
+  FutureOr<List<GraphNodeStep<T>>> toGraphNodeStepAsync(
+      GraphNodeStep<T> previous) {
+    var l = <FutureOr<GraphNodeStep<T>>>[];
+
+    var futureCount = 0;
+    for (var node in this) {
+      if (node is Future<Node<T>?>) {
+        var stepAsync = node.then((node) {
+          if (node == null) {
+            throw StateError("Null node");
+          }
+          return GraphNodeStep<T>(previous.walker, previous, node);
+        });
+        l.add(stepAsync);
+        futureCount++;
+      } else {
+        if (node == null) {
+          throw StateError("Null node");
+        }
+        var step = GraphNodeStep<T>(previous.walker, previous, node);
+        l.add(step);
+      }
+    }
+
+    final length = l.length;
+
+    if (length == 0) {
+      return [];
+    } else if (futureCount == 0) {
+      return l.cast<GraphNodeStep<T>>();
+    } else if (futureCount == length) {
+      return Future.wait(l.cast<Future<GraphNodeStep<T>>>());
+    } else {
+      return Future.wait(l.map((e) {
+        return e is Future<GraphNodeStep<T>> ? e : Future.value(e);
+      }));
+    }
+  }
 }
 
 extension _ListQueueExtension<T> on ListQueue<T> {
