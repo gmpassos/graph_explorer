@@ -12,6 +12,8 @@ void main() async {
   graph.node('c').addOutput('f');
   graph.node('d').getOrAddOutput('e').addOutput('f');
 
+  graph.node('f').addOutput('x');
+
   var result = await graph.scanPathsFrom('a', 'f', findAll: true);
 
   print("Paths from `a` to `f`:");
@@ -28,7 +30,7 @@ void main() async {
 
   var tree = graph.toTree();
 
-  print('\nGraph to Tree:');
+  print('\nGraph to JSON Tree:');
   print(_encodeJsonPretty(tree));
 }
 
@@ -45,12 +47,14 @@ String _encodeJsonPretty(dynamic json) =>
 // Shortest paths:
 // - [a, b, c, f]
 //
-// Graph to Tree:
+// Graph to JSON Tree:
 // {
 //   "a": {
 //     "b": {
 //       "c": {
-//         "f": null
+//         "f": {
+//           "x": null
+//         }
 //       },
 //       "d": {
 //         "e": {
