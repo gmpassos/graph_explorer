@@ -1164,11 +1164,13 @@ void main() {
         (step, walk) => walk.add(step.nodeValue),
         isFalse,
         ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
       );
 
       await doWalkerTest(
         (step, walk) => walk.add(step.nodeValue),
         isFalse,
+        ['a', 'b', 'c', 'd', 'f', 'e', 'g', 'x', 'h'],
         ['a', 'b', 'c', 'd', 'f', 'e', 'g', 'x', 'h'],
         bfs: true,
       );
@@ -1183,6 +1185,7 @@ void main() {
         },
         equals('found'),
         ['a', 'b', 'c', 'f', 'x'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
       );
 
       await doWalkerTest(
@@ -1195,12 +1198,14 @@ void main() {
         },
         equals(Node('x')),
         ['a', 'b', 'c', 'f', 'x'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
       );
 
       await doWalkerTest<String>(
         (step, walk) => walk.add(step.nodeValue),
         isNull,
         ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'f', 'x', 'h', 'g'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
 
@@ -1214,6 +1219,7 @@ void main() {
         },
         equals(Node('f')),
         ['a', 'b', 'c', 'f'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
 
@@ -1226,6 +1232,7 @@ void main() {
           return null;
         },
         isNull,
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
@@ -1241,6 +1248,7 @@ void main() {
         },
         isNull,
         ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
 
@@ -1254,6 +1262,7 @@ void main() {
         },
         isNull,
         ['a', 'b', 'c', 'f', 'x'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
 
@@ -1267,8 +1276,62 @@ void main() {
         },
         isNull,
         ['a', 'b', 'c', 'f', 'x', 'd'],
+        ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
+
+      {
+        outputsProvider(step, node) {
+          var nodeValue = node.value;
+          switch (nodeValue) {
+            case 'a':
+              return ['b'];
+            case 'b':
+              return ['c', 'd'];
+            case 'c':
+              return ['f'];
+            case 'd':
+              return ['e', 'g'];
+            case 'e':
+              return ['f', 'h'];
+            case 'f':
+              return ['x'];
+            default:
+              return null;
+          }
+        }
+
+        var graphWalker = GraphWalker<String>(maxExpansion: 1, bfs: false);
+
+        var parents = [];
+        var paths = <List<String>>[];
+
+        graphWalker.walkByNodes(
+          ['a'].toNodes(),
+          outputsProvider: (s, n) => outputsProvider(s, n)?.toNodes(),
+          process: (step) {
+            parents.add(step.parentValue);
+            paths.add(step.valuePathToRoot);
+            return null;
+          },
+        );
+
+        expect(parents, equals([null, 'a', 'b', 'c', 'f', 'b', 'd', 'e', 'd']));
+
+        expect(
+            paths,
+            equals([
+              ['a'],
+              ['a', 'b'],
+              ['a', 'b', 'c'],
+              ['a', 'b', 'c', 'f'],
+              ['a', 'b', 'c', 'f', 'x'],
+              ['a', 'b', 'd'],
+              ['a', 'b', 'd', 'e'],
+              ['a', 'b', 'd', 'e', 'h'],
+              ['a', 'b', 'd', 'g'],
+            ]));
+      }
     });
   });
 
@@ -1413,10 +1476,11 @@ void main() {
   });
 }
 
-Future<void> doWalkerTest<R>(
+Future<GraphWalker<String>> doWalkerTest<R>(
     Function(GraphNodeStep<String> step, List<String> walk) process,
     dynamic returnExpected,
     List<String> expectedWalk,
+    List<String> expectedOrder,
     {int maxExpansion = 1,
     bool bfs = false}) async {
   outputsProvider(step, nodeValue) {
@@ -1447,10 +1511,24 @@ Future<void> doWalkerTest<R>(
   outputsProviderNodesAsync(step, node) async =>
       outputsProviderNodes(step, node);
 
-  {
-    var walk = <String>[];
+  var graphWalker = GraphWalker<String>(maxExpansion: maxExpansion, bfs: bfs);
 
-    var graphWalker = GraphWalker<String>(maxExpansion: maxExpansion, bfs: bfs);
+  {
+    graphWalker.reset();
+
+    var order = graphWalker.walkOrder(
+      ['a'],
+      nodeProvider: (step, nodeValue) => Node(nodeValue),
+      outputsProvider: outputsProviderNodes,
+    );
+
+    expect(order.toListOfValues(), equals(expectedOrder));
+  }
+
+  {
+    graphWalker.reset();
+
+    var walk = <String>[];
 
     var res = graphWalker.walk<R>(
       ['a'],
@@ -1464,9 +1542,9 @@ Future<void> doWalkerTest<R>(
   }
 
   {
-    var walk = <String>[];
+    graphWalker.reset();
 
-    var graphWalker = GraphWalker<String>(maxExpansion: maxExpansion, bfs: bfs);
+    var walk = <String>[];
 
     var res = graphWalker.walkByNodes<R>(
       ['a'].toNodes(),
@@ -1479,9 +1557,9 @@ Future<void> doWalkerTest<R>(
   }
 
   {
-    var walk = <String>[];
+    graphWalker.reset();
 
-    var graphWalker = GraphWalker<String>(maxExpansion: maxExpansion, bfs: bfs);
+    var walk = <String>[];
 
     var res = await graphWalker.walkAsync<R>(
       ['a'],
@@ -1495,9 +1573,9 @@ Future<void> doWalkerTest<R>(
   }
 
   {
-    var walk = <String>[];
+    graphWalker.reset();
 
-    var graphWalker = GraphWalker<String>(maxExpansion: maxExpansion, bfs: bfs);
+    var walk = <String>[];
 
     var res = await graphWalker.walkByNodesAsync<R>(
       ['a'].toNodes(),
@@ -1508,6 +1586,8 @@ Future<void> doWalkerTest<R>(
     expect(walk, equals(expectedWalk));
     expect(res, returnExpected);
   }
+
+  return graphWalker;
 }
 
 Future<void> doGraphScannerTest({

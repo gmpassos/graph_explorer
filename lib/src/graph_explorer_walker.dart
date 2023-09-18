@@ -618,7 +618,7 @@ class GraphWalker<T> {
   }
 
   /// Returns the walk order of nodes.
-  List<Node<T>> walkOrder<K>(
+  List<Node<T>> walkOrder(
     List<T> roots, {
     required GraphWalkNodeProvider<T> nodeProvider,
     required GraphWalkNodeOutputsProvider<T> outputsProvider,
