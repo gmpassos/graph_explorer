@@ -773,7 +773,7 @@ class Graph<T> implements NodeIO<T> {
         from.toList(),
         nodeProvider: (step, nodeValue) => getNode(nodeValue),
         outputsProvider: (step, node) => node._outputs,
-        expandSideRoots: expandSideRoots,
+        expandSideBranches: expandSideRoots,
       );
 
   /// Walk the graph nodes outputs starting [from] and stopping at [stopMatcher] (if provided).

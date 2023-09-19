@@ -1,6 +1,6 @@
 import 'package:graph_explorer/graph_explorer.dart';
 import 'package:test/test.dart';
-
+import 'dart:convert' as dart_convert;
 // ignore_for_file: unrelated_type_equality_checks
 
 void main() {
@@ -1279,57 +1279,106 @@ void main() {
         ['a', 'b', 'c', 'f', 'x', 'd', 'e', 'h', 'g'],
         maxExpansion: 3,
       );
+    });
 
+    test('walkByNodes (processSideBranches)', () {
       {
-        outputsProvider(step, node) {
-          var nodeValue = node.value;
-          switch (nodeValue) {
-            case 'a':
-              return ['b'];
-            case 'b':
-              return ['c', 'd'];
-            case 'c':
-              return ['f'];
-            case 'd':
-              return ['e', 'g'];
-            case 'e':
-              return ['f', 'h'];
-            case 'f':
-              return ['x'];
-            default:
-              return null;
-          }
-        }
+        var graph = Graph<String>();
+
+        graph.node('a').getOrAddOutput('b');
+
+        graph.node('b')
+          ..getOrAddOutput('c')
+          ..getOrAddOutput('d');
+
+        graph.node('c').getOrAddOutput('f');
+
+        graph.node('d')
+          ..getOrAddOutput('e')
+          ..getOrAddOutput('g');
+
+        graph.node('e')
+          ..getOrAddOutput('f')
+          ..getOrAddOutput('h');
+
+        graph.node('f').getOrAddOutput('x');
+
+        graph.node('m').getOrAddOutput('n');
+
+        graph.node('n').getOrAddOutput('f');
 
         var graphWalker = GraphWalker<String>(maxExpansion: 1, bfs: false);
 
-        var parents = [];
-        var paths = <List<String>>[];
+        var paths1 = <String>[];
+        var pathsSide1 = <String, List<String>>{};
 
         graphWalker.walkByNodes(
-          ['a'].toNodes(),
-          outputsProvider: (s, n) => outputsProvider(s, n)?.toNodes(),
+          graph.getNodes(['a']),
+          outputsProvider: (step, node) => node.outputs,
           process: (step) {
-            parents.add(step.parentValue);
-            paths.add(step.valuePathToRoot);
+            paths1.add(step.fullPathToRoot());
+            return null;
+          },
+          processSideBranches: (step, sideBranches) {
+            pathsSide1[step.nodeValue] = sideBranches.toListOfValues();
             return null;
           },
         );
 
-        expect(parents, equals([null, 'a', 'b', 'c', 'f', 'b', 'd', 'e', 'd']));
+        expect(
+            paths1,
+            equals([
+              'a',
+              'a/b',
+              'a/b/c',
+              'a/b/c/f',
+              'a/b/c/f/x',
+              'a/b/d',
+              'a/b/d/e',
+              'a/b/d/e/h',
+              'a/b/d/g'
+            ]));
 
         expect(
-            paths,
+            pathsSide1,
+            equals({
+              'c': ['m', 'e', 'd', 'n'],
+              'f': ['e', 'd', 'n', 'm'],
+              'x': ['e', 'd', 'n', 'm'],
+              'e': ['m']
+            }));
+
+        graphWalker.reset();
+
+        var paths2 = <String>[];
+
+        graphWalker.walkByNodes(
+          graph.getNodes(['a']),
+          expandSideBranches: true,
+          outputsProvider: (step, node) => node.outputs,
+          process: (step) {
+            var fullPathToRoot = step.fullPathToRoot();
+            paths2.add(fullPathToRoot);
+            return null;
+          },
+        );
+
+        print(dart_convert.json.encode(paths2));
+
+        expect(
+            paths2,
             equals([
-              ['a'],
-              ['a', 'b'],
-              ['a', 'b', 'c'],
-              ['a', 'b', 'c', 'f'],
-              ['a', 'b', 'c', 'f', 'x'],
-              ['a', 'b', 'd'],
-              ['a', 'b', 'd', 'e'],
-              ['a', 'b', 'd', 'e', 'h'],
-              ['a', 'b', 'd', 'g'],
+              'a',
+              'a/b',
+              'a/b/c',
+              'm',
+              'm/n',
+              'm/n/e',
+              'm/n/e/d',
+              'm/n/e/d/g',
+              'm/n/e/f',
+              'm/n/e/f/x',
+              'm/n/e/h'
             ]));
       }
     });

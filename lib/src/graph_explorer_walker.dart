@@ -39,12 +39,19 @@ abstract class GraphStep<T> {
   /// NOT [isRoot].
   bool get isNotRoot => previous != null;
 
+  /// Returns `true` if this is a side root step.
+  bool get isSideRoot => false;
+
   List<T>? _valuePathToRoot;
 
   /// The values path to the root step.
   List<T> get valuePathToRoot => _valuePathToRoot ??= _valuePathToRootImpl();
 
   List<T> _valuePathToRootImpl() {
+    if (isRoot || isSideRoot) {
+      return [nodeValue];
+    }
+
     final previousPath = previous?._valuePathToRoot;
     if (previousPath != null) {
       return [...previousPath, nodeValue];
@@ -55,6 +62,9 @@ abstract class GraphStep<T> {
     GraphStep<T>? step = this;
     while (step != null) {
       path.add(step.nodeValue);
+
+      if (step.isRoot || step.isSideRoot) break;
+
       step = step.previous;
     }
 
@@ -136,16 +146,16 @@ class GraphNodeStep<T> extends GraphStep<T> {
   /// The node of this step.
   final Node<T> node;
 
-  /// If `true` this is a side root node.
-  final bool sideRoot;
+  /// If `true` this is a [Node] step from a side branch.
+  final bool sideBranch;
 
   GraphNodeStep.root(this.walker, this.node)
       : previous = null,
         depth = 0,
-        sideRoot = false;
+        sideBranch = false;
 
   GraphNodeStep.subNode(GraphNodeStep<T> previous, this.node,
-      {this.sideRoot = false})
+      {this.sideBranch = false})
       : walker = previous.walker,
         // ignore: prefer_initializing_formals
         previous = previous,
@@ -159,6 +169,9 @@ class GraphNodeStep<T> extends GraphStep<T> {
 
   @override
   T get nodeValue => node.value;
+
+  @override
+  bool get isSideRoot => sideBranch && node.isRoot;
 
   List<Node<T>>? _nodePathToRoot;
 
@@ -190,11 +203,14 @@ typedef GraphWalkNodeProviderAsync<T> = FutureOr<Node<T>?> Function(
 
 typedef GraphWalkNodeProcessor<T, R> = Object? Function(GraphNodeStep<T> step);
 
-typedef GraphWalkSideRootProcessor<T, R> = Object? Function(
-    GraphNodeStep<T> step, List<Node<T>> sideRoots);
+typedef GraphWalkSideBranchProcessor<T, R> = Object? Function(
+    GraphNodeStep<T> step, List<Node<T>> sideBranches);
 
 typedef GraphWalkNodeProcessorAsync<T, R> = FutureOr<Object?> Function(
     GraphNodeStep<T> step);
+
+typedef GraphWalkSideBranchProcessorAsync<T, R> = FutureOr<Object?> Function(
+    GraphNodeStep<T> step, List<Node<T>> sideBranches);
 
 typedef GraphWalkNodeOutputsProvider<T> = Iterable<Node<T>>? Function(
     GraphNodeStep<T> step, Node<T> node);
@@ -314,7 +330,10 @@ class GraphWalker<T> {
     required GraphWalkNodeProvider<T> nodeProvider,
     required GraphWalkOutputsProvider<T> outputsProvider,
     required GraphWalkNodeProcessor<T, R> process,
+    int? maxDepth,
   }) {
+    maxDepth ??= defaultMaxDepth;
+
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
 
@@ -335,7 +354,7 @@ class GraphWalker<T> {
 
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion) {
+      if (processCount <= maxExpansion && step.depth <= maxDepth) {
         if (processRoots || step.isNotRoot) {
           var ret = process(step);
 
@@ -459,8 +478,8 @@ class GraphWalker<T> {
     Iterable<Node<T>> from, {
     required GraphWalkNodeOutputsProvider<T> outputsProvider,
     required GraphWalkNodeProcessor<T, R> process,
-    GraphWalkSideRootProcessor<T, R>? processSideRoots,
-    bool expandSideRoots = false,
+    GraphWalkSideBranchProcessor<T, R>? processSideBranches,
+    bool expandSideBranches = false,
     int? maxDepth,
   }) {
     maxDepth ??= defaultMaxDepth;
@@ -484,13 +503,13 @@ class GraphWalker<T> {
         if (processRoots || step.isNotRoot) {
           var ret = process(step);
 
-          if (ret == null && processSideRoots != null) {
-            var sideRoots = _computeSideRoots(node, processed);
-            if (sideRoots.isNotEmpty) {
+          if (ret == null && processSideBranches != null) {
+            var sideBranches = _computeSideBranch(node, processed);
+            if (sideBranches.isNotEmpty) {
               if (sortByInputDependency) {
-                sideRoots = sideRoots.sortedByInputDependency();
+                sideBranches = sideBranches.sortedByInputDependency();
               }
-              ret = processSideRoots(step, sideRoots);
+              ret = processSideBranches(step, sideBranches);
             }
           }
 
@@ -518,11 +537,11 @@ class GraphWalker<T> {
           return _resolveWalkProcessReturn<T, R>(node, true);
         }
 
-        List<Node<T>>? sideRoots;
-        if (expandSideRoots && processSideRoots == null) {
-          sideRoots = _computeSideRoots(node, processed);
+        List<Node<T>>? sideBranches;
+        if (expandSideBranches && processSideBranches == null) {
+          sideBranches = _computeSideBranch(node, processed);
           if (sortByInputDependency) {
-            sideRoots = sideRoots.sortedByInputDependency();
+            sideBranches = sideBranches.sortedByInputDependency();
           }
         }
 
@@ -531,11 +550,11 @@ class GraphWalker<T> {
           outputs = outputs?.sortedByInputDependency();
         }
 
-        var nextStepsSideRoots =
-            sideRoots?.toGraphNodeStep(step, sideRoots: true);
+        var nextStepsSideBranches =
+            sideBranches?.toGraphNodeStep(step, sideBranch: true);
         var nextStepsOutputs = outputs?.toGraphNodeStep(step);
 
-        queue.addAllToScanQueue2(nextStepsSideRoots, nextStepsOutputs, bfs);
+        queue.addAllToScanQueue2(nextStepsSideBranches, nextStepsOutputs, bfs);
       }
     }
 
@@ -547,14 +566,20 @@ class GraphWalker<T> {
     Iterable<Node<T>> from, {
     required GraphWalkNodeOutputsProviderAsync<T> outputsProvider,
     required GraphWalkNodeProcessorAsync<T, R> process,
+    GraphWalkSideBranchProcessorAsync<T, R>? processSideBranches,
+    bool expandSideBranches = false,
+    int? maxDepth,
   }) async {
+    maxDepth ??= defaultMaxDepth;
+
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
 
-    for (var rootNode in from) {
-      var rootStep = GraphNodeStep.root(this, rootNode);
-      queue.add(rootStep);
+    if (sortByInputDependency) {
+      from = from.sortedByInputDependency();
     }
+
+    queue.addAll(from.toGraphRootStep(this));
 
     while (queue.isNotEmpty) {
       final step = queue.removeFirst();
@@ -562,9 +587,19 @@ class GraphWalker<T> {
 
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion) {
+      if (processCount <= maxExpansion && step.depth <= maxDepth) {
         if (processRoots || step.isNotRoot) {
           var ret = await process(step);
+
+          if (ret == null && processSideBranches != null) {
+            var sideBranches = _computeSideBranch(node, processed);
+            if (sideBranches.isNotEmpty) {
+              if (sortByInputDependency) {
+                sideBranches = sideBranches.sortedByInputDependency();
+              }
+              ret = await processSideBranches(step, sideBranches);
+            }
+          }
 
           if (ret != null) {
             if (ret is GraphWalkingInstructionResult) {
@@ -590,10 +625,24 @@ class GraphWalker<T> {
           return _resolveWalkProcessReturn<T, R>(node, true);
         }
 
-        var outputs = await outputsProvider(step, node);
-        if (outputs != null) {
-          queue.addAllToScanQueue(outputs.toGraphNodeStep(step), bfs);
+        List<Node<T>>? sideBranches;
+        if (expandSideBranches && processSideBranches == null) {
+          sideBranches = _computeSideBranch(node, processed);
+          if (sortByInputDependency) {
+            sideBranches = sideBranches.sortedByInputDependency();
+          }
         }
+
+        var outputs = await outputsProvider(step, node);
+        if (sortByInputDependency) {
+          outputs = outputs?.sortedByInputDependency();
+        }
+
+        var nextStepsSideBranches =
+            sideBranches?.toGraphNodeStep(step, sideBranch: true);
+        var nextStepsOutputs = outputs?.toGraphNodeStep(step);
+
+        queue.addAllToScanQueue2(nextStepsSideBranches, nextStepsOutputs, bfs);
       }
     }
 
@@ -622,7 +671,7 @@ class GraphWalker<T> {
     List<T> roots, {
     required GraphWalkNodeProvider<T> nodeProvider,
     required GraphWalkNodeOutputsProvider<T> outputsProvider,
-    bool expandSideRoots = false,
+    bool expandSideBranches = false,
     int? maxDepth,
   }) {
     maxDepth ??= defaultMaxDepth;
@@ -659,11 +708,11 @@ class GraphWalker<T> {
           break;
         }
 
-        List<Node<T>>? sideRoots;
-        if (expandSideRoots) {
-          sideRoots = _computeSideRoots(node, processed);
+        List<Node<T>>? sideBranches;
+        if (expandSideBranches) {
+          sideBranches = _computeSideBranch(node, processed);
           if (sortByInputDependency) {
-            sideRoots = sideRoots.sortedByInputDependency();
+            sideBranches = sideBranches.sortedByInputDependency();
           }
         }
 
@@ -672,26 +721,28 @@ class GraphWalker<T> {
           outputs = outputs?.sortedByInputDependency();
         }
 
-        var nextStepsSideRoots =
-            sideRoots?.toGraphNodeStep(step, sideRoots: true);
+        var nextStepsSideBranch =
+            sideBranches?.toGraphNodeStep(step, sideBranch: true);
         var nextStepsOutputs = outputs?.toGraphNodeStep(step);
 
-        queue.addAllToScanQueue2(nextStepsSideRoots, nextStepsOutputs, bfs);
+        queue.addAllToScanQueue2(nextStepsSideBranch, nextStepsOutputs, bfs);
       }
     }
 
     return walkOrder.toList();
   }
 
-  List<Node<T>> _computeSideRoots(Node<T> node, Map<Node<T>, int> processed) {
+  List<Node<T>> _computeSideBranch(Node<T> node, Map<Node<T>, int> processed) {
     var sideRoots = node.sideRoots(maxDepth: 1);
 
-    var dependencies = processed.keys.where((e) => e != node).toList();
+    var knownDependencies = processed.keys.where((e) => e != node).toList();
 
-    var missing = node.missingDependencies(dependencies);
+    var missing =
+        node.missingDependencies(knownDependencies, maxDepth: 1).toList();
+
     if (missing.isNotEmpty) {
-      var sideRoots2 = sideRoots.merge(missing);
-      return sideRoots2;
+      var sideBranches = sideRoots.merge(missing);
+      return sideBranches;
     }
 
     return sideRoots;
@@ -819,9 +870,9 @@ extension _ToGraphNodeStepIterableExtension<T> on Iterable<Node<T>> {
       map((node) => GraphNodeStep<T>.root(walker, node));
 
   Iterable<GraphNodeStep<T>> toGraphNodeStep(GraphNodeStep<T> previous,
-          {bool sideRoots = false}) =>
+          {bool sideBranch = false}) =>
       map((node) =>
-          GraphNodeStep<T>.subNode(previous, node, sideRoot: sideRoots));
+          GraphNodeStep<T>.subNode(previous, node, sideBranch: sideBranch));
 }
 
 extension _ToGraphNodeStepIterableAsyncExtension<T>
