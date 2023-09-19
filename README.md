@@ -25,12 +25,14 @@ void main() async {
   graph.node('a').getOrAddOutput('b')
     ..addOutput('c')
     ..addOutput('d');
-
+  
   graph.node('c').addOutput('f');
   graph.node('d').getOrAddOutput('e').addOutput('f');
-
+  
+  graph.node('f').addOutput('x');
+  
   var result = await graph.scanPathsFrom('a', 'f', findAll: true);
-
+  
   print("Paths from `a` to `f`:");
   for (var p in result.paths) {
     var lStr = p.toListOfString();
@@ -45,12 +47,8 @@ void main() async {
 
   var tree = graph.toTree();
 
-  print('\nGraph to Tree:');
+  print('\nGraph to JSON Tree:');
   print(_encodeJsonPretty(tree));
-
-  var asciiArtTree = graph.toASCIIArtTree();
-  print('\nGraph to ASCII Art Tree:');
-  print(asciiArtTree.generate());
 }
 
 String _encodeJsonPretty(dynamic json) =>
@@ -66,32 +64,61 @@ Paths from `a` to `f`:
 Shortest paths:
 - [a, b, c, f]
 
-Graph to Tree:
+Graph to JSON Tree:
 {
   "a": {
     "b": {
       "c": {
-        "f": {}
+        "f": {
+          "x": null
+        }
       },
       "d": {
         "e": {
-          "f": "f"
+          "f": "f"  // This is a reference to the node `f` above.
         }
       }
     }
   }
 }
+```
 
-Graph to ASCII Art Tree:
+## ascii_art_tree
+
+With the package [ascii_art_tree] you can easly generate an ASCII Art Tree of the `Graph` object:
+
+```dart
+import 'package:ascii_art_tree/ascii_art_tree.dart'; // Import extension on `Graph`
+import 'package:graph_explorer/graph_explorer.dart';
+
+void main() {
+  var graph = Graph<String>();
+
+  // Build the graph as
+  // shown in the example above...
+
+  // Build the `ASCIIArtTree`:
+  var asciiArtTree = graph.toASCIIArtTree();
+
+  // Generate the ASCII Art text:
+  var tree = asciiArtTree.generate();
+  print(tree);
+}
+```
+
+Output:
+```text
 a
 └─┬─ b
-  ├─┬─ c
-  │ └──> f
-  └─┬─ d
-    └─┬─ e
-      └──> f ººº
-
+  ├─┬─ d
+  │ └─┬─ e
+  │   └─┬─ f
+  │     └──> x
+  └─┬─ c
+    └─┬─ f ººº
 ```
+
+[ascii_art_tree]: https://pub.dev/packages/ascii_art_tree
 
 ## Features and bugs
 

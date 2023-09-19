@@ -7,20 +7,94 @@
 //
 
 import 'dart:async';
-import 'dart:collection';
 
-import 'package:ascii_art_tree/ascii_art_tree.dart';
 import 'package:collection/collection.dart';
+
+import 'graph_explorer_walker.dart';
 
 /// A [Node] matcher, used by [GraphScanner].
 abstract class NodeMatcher<T> {
   NodeMatcher();
+
+  factory NodeMatcher.eq(List<T> targets) {
+    return targets.length == 1
+        ? NodeEquals(targets.first)
+        : MultipleNodesEquals(targets);
+  }
 
   /// Returns `true` if [node] matches.
   bool matchesNode(Node<T> node) => matchesValue(node.value);
 
   /// Returns `true` if [value] matches.
   bool matchesValue(T value);
+}
+
+/// A [Node] matcher that matches ANY node (always returns `true` for a match).
+class AnyNode<T> extends NodeMatcher<T> {
+  @override
+  bool matchesNode(Node<T> node) => true;
+
+  @override
+  bool matchesValue(T value) => true;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    if (other is NodeMatcher) {
+      return true;
+    } else if (other is Node) {
+      return true;
+    } else if (other is List) {
+      return true;
+    } else if (other is T) {
+      return true;
+    }
+
+    return false;
+  }
+
+  @override
+  int get hashCode => 1;
+
+  @override
+  String toString() {
+    return 'AnyNode{}';
+  }
+}
+
+/// A [Node] matcher that always returns `false` and never matches a node.
+class NoneNode<T> extends NodeMatcher<T> {
+  @override
+  bool matchesNode(Node<T> node) => false;
+
+  @override
+  bool matchesValue(T value) => false;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+
+    if (other is NodeMatcher) {
+      return false;
+    } else if (other is Node) {
+      return false;
+    } else if (other is List) {
+      return false;
+    } else if (other is T) {
+      return false;
+    }
+
+    return false;
+  }
+
+  @override
+  int get hashCode => 0;
+
+  @override
+  String toString() {
+    return 'NoneNode{}';
+  }
 }
 
 /// A [Node] matcher that uses object equality (`==` operator).
@@ -40,6 +114,8 @@ class NodeEquals<T> extends NodeMatcher<T> {
       return targetValue == other.targetValue;
     } else if (other is MultipleNodesEquals) {
       return other.targetValues.every((e) => e == targetValue);
+    } else if (other is Node<T>) {
+      return targetValue == other.value;
     } else if (other is T) {
       return targetValue == other;
     } else if (other is List<T>) {
@@ -75,6 +151,10 @@ class MultipleNodesEquals<T> extends NodeMatcher<T> {
       return other.targetValues.every((e) => targetValues.contains(e));
     } else if (other is NodeEquals<T>) {
       return targetValues.contains(other.targetValue);
+    } else if (other is List<Node<T>>) {
+      return other.every((e) => targetValues.contains(e.value));
+    } else if (other is Node<T>) {
+      return targetValues.contains(other.value);
     } else if (other is List<T>) {
       return other.every((e) => targetValues.contains(e));
     } else if (other is T) {
@@ -132,9 +212,13 @@ class GraphScanner<T> {
   ///
   /// The paths should start at [from] and end at a node that matches [targetMatcher].
   Future<GraphScanResult<T>> scanPathsFrom(T from, NodeMatcher<T> targetMatcher,
-      {Graph<T>? graph, NodesProvider<T>? outputsProvider}) async {
+      {Graph<T>? graph,
+      NodesProvider<T>? outputsProvider,
+      int maxExpansion = 3}) async {
     return scanPathsFromMany([from], targetMatcher,
-        graph: graph, outputsProvider: outputsProvider);
+        graph: graph,
+        outputsProvider: outputsProvider,
+        maxExpansion: maxExpansion);
   }
 
   /// Performs a scan and returns the found node paths.
@@ -143,68 +227,78 @@ class GraphScanner<T> {
   /// matches [targetMatcher].
   Future<GraphScanResult<T>> scanPathsFromMany(
       List<T> fromMany, NodeMatcher<T> targetMatcher,
-      {Graph<T>? graph, NodesProvider<T>? outputsProvider}) async {
+      {Graph<T>? graph,
+      NodesProvider<T>? outputsProvider,
+      int maxExpansion = 3}) async {
     var initTime = DateTime.now();
+
+    GraphWalkingInstruction<bool>? processTarget(GraphNodeStep<T> step) {
+      var node = step.node;
+
+      if (targetMatcher.matchesNode(node)) {
+        node.markAsTarget();
+        if (!findAll) {
+          return GraphWalkingInstruction.stop();
+        }
+      }
+      return null;
+    }
 
     if (graph == null) {
       graph = Graph<T>();
-    } else {
-      graph.reset();
-    }
 
-    var populate = true;
-    if (outputsProvider == null) {
-      outputsProvider = (Graph<T> graph, Node<T> node) => node._outputs;
-      populate = false;
-    }
+      if (outputsProvider == null) {
+        return GraphScanResult(graph, fromMany, targetMatcher, [],
+            findAll: findAll,
+            time: Duration.zero,
+            resolvePathsTime: Duration.zero);
+      }
 
-    final scanQueue = ListQueue<Node<T>>(fromMany.length * 2);
+      FutureOr<Iterable<T>> nodeOutputsProvider(
+          GraphNodeStep<T> step, T nodeValue) {
+        var l = outputsProvider(graph!, graph.node(nodeValue));
 
-    for (var fromNode in fromMany) {
-      scanQueue.add(graph.node(fromNode));
-    }
-
-    final scannedNodes = <Node<T>>{};
-
-    SCAN:
-    while (scanQueue.isNotEmpty) {
-      var node = scanQueue.removeFirst();
-
-      var outputs = await outputsProvider(graph, node);
-
-      for (var output in outputs) {
-        var checkNode = true;
-        if (populate) {
-          checkNode = output._addInputNode(node) != null;
-          node._addOutputNode(output);
+        if (l is Future<List<Node<T>>>) {
+          return l.then((l) => l.toIterableOfValues());
         } else {
-          output._addInputNode(node);
-        }
-
-        // Probably a new node:
-        if (checkNode) {
-          // Found a target:
-          if (targetMatcher.matchesNode(output)) {
-            output.markAsTarget();
-
-            if (!findAll) {
-              break SCAN;
-            }
-          }
-
-          // New node to scan:
-          if (scannedNodes.add(output)) {
-            scanQueue.addLast(output);
-          }
+          return l.toIterableOfValues();
         }
       }
+
+      await graph.populateAsync(fromMany,
+          outputsProvider: nodeOutputsProvider,
+          process: processTarget,
+          maxExpansion: maxExpansion);
+    } else {
+      if (graph.isEmpty && outputsProvider == null) {
+        return GraphScanResult(graph, fromMany, targetMatcher, [],
+            findAll: findAll,
+            time: Duration.zero,
+            resolvePathsTime: Duration.zero);
+      }
+
+      graph.reset();
+
+      final nodeOutputsProvider = outputsProvider != null
+          ? (GraphNodeStep<T> step, Node<T> node) =>
+              outputsProvider(graph!, node)
+          : (GraphNodeStep<T> step, Node<T> node) => node._outputs;
+
+      await GraphWalker<T>(
+        maxExpansion: maxExpansion,
+        bfs: true,
+      ).walkByNodesAsync<bool>(
+        graph.valuesToNodes(fromMany, createNodes: true),
+        process: processTarget,
+        outputsProvider: nodeOutputsProvider,
+      );
     }
 
     var pathsInitTime = DateTime.now();
 
     var targets = graph.targets;
 
-    var paths = _resolvePaths(targets);
+    var paths = _resolvePaths(targets, maxExpansion);
 
     if (!findAll) {
       paths = paths.shortestPaths();
@@ -218,9 +312,10 @@ class GraphScanner<T> {
         findAll: findAll, time: time, resolvePathsTime: timePaths);
   }
 
-  List<List<Node<T>>> _resolvePaths(List<Node<T>> targets) {
+  List<List<Node<T>>> _resolvePaths(List<Node<T>> targets, int maxExpansion) {
     var pathsItr = findAll
-        ? targets.expand((e) => e.resolveAllPathsToRoot())
+        ? targets
+            .expand((e) => e.resolveAllPathsToRoot(maxExpansion: maxExpansion))
         : targets.map((e) => e.shortestPathToRoot);
 
     var paths = pathsItr.toList();
@@ -265,6 +360,9 @@ class Graph<T> implements NodeIO<T> {
   /// Returns all the [Node]s in this graph.
   Iterable<Node<T>> get allNodes => _allNodes.values;
 
+  /// Returns all the [Node.value]s in this graph.
+  Iterable<T> get allNodesValues => _allNodes.values.map((e) => e.value);
+
   /// Returns `true` this graph is empty.
   bool get isEmpty => _allNodes.isEmpty;
 
@@ -278,38 +376,63 @@ class Graph<T> implements NodeIO<T> {
 
   /// Creates a [Graph] from [json].
   factory Graph.fromJson(Map<String, dynamic> json,
-      {T Function(String key)? nodeValueMapper}) {
+      {T Function(GraphStep<T>? previousStep, String key)? nodeValueMapper}) {
     if (nodeValueMapper == null) {
       if (T == String) {
-        nodeValueMapper = (k) => k.toString() as T;
+        nodeValueMapper = (s, k) => k.toString() as T;
       } else {
-        nodeValueMapper = (k) => k as T;
+        nodeValueMapper = (s, k) => k as T;
       }
     }
 
-    final g = Graph<T>();
+    final graph = Graph<T>();
 
-    final queue = ListQueue<List>()..add([g, json]);
+    graph.populate(
+      json.keys.map((k) => nodeValueMapper!(null, k)),
+      maxExpansion: 999999999,
+      nodeProvider: (step, nodeValue) {
+        var node = graph.node(nodeValue);
 
-    while (queue.isNotEmpty) {
-      var entry = queue.removeFirst();
+        var parentNode = graph.getNode(step.parentValue);
+        Map parentJsonNode = parentNode?.attachment ?? json;
+        var jsonNode = parentJsonNode[nodeValue];
 
-      var node = entry[0] as NodeIO<T>;
-      var map = entry[1] as Map<String, dynamic>;
-
-      for (var e in map.entries) {
-        var nodeValue = nodeValueMapper(e.key);
-
-        var child = node.addOutput(nodeValue);
-        var childNodes = e.value;
-
-        if (child != null && childNodes is Map<String, dynamic>) {
-          queue.add([child, e.value]);
+        var nodeAttachment = node.attachment;
+        if (nodeAttachment == null) {
+          if (jsonNode != null && (jsonNode is! Map && jsonNode is! String)) {
+            throw StateError("Invalid node type> $nodeValue: $jsonNode");
+          }
+          node.attachment = jsonNode;
+        } else if (!identical(jsonNode, nodeAttachment)) {
+          if (jsonNode is Map) {
+            if (nodeAttachment is Map) {
+              nodeAttachment.addAll(jsonNode);
+            } else if (nodeAttachment is String) {
+              node.attachment = jsonNode;
+            }
+          } else if (jsonNode is String) {
+            if (jsonNode != nodeValue.toString()) {
+              throw StateError(
+                  "Invalid node reference: $nodeValue -> $jsonNode");
+            }
+          } else if (jsonNode != null) {
+            throw StateError(
+                "Invalid node type (graph)> $nodeValue: $jsonNode");
+          }
         }
-      }
-    }
 
-    return g;
+        return node;
+      },
+      outputsProvider: (step, nodeValue) {
+        var jsonNode = graph.getNode(nodeValue)?.attachment;
+        if (jsonNode is! Map || jsonNode.isEmpty) return null;
+        var outputs =
+            jsonNode.keys.map((k) => nodeValueMapper!(step, k.toString()));
+        return outputs;
+      },
+    );
+
+    return graph;
   }
 
   /// Returns all the leaves of this graph (nodes without outputs)
@@ -328,7 +451,12 @@ class Graph<T> implements NodeIO<T> {
   /// Adds a [Node] to the graph.
   /// Alias to [node].
   @override
-  Node<T>? addInput(T nodeValue) => node(nodeValue);
+  Node<T>? addInput(T nodeValue) {
+    if (!_allNodes.containsKey(nodeValue)) {
+      return node(nodeValue);
+    }
+    return null;
+  }
 
   /// Alias to [allNodes].
   @override
@@ -342,16 +470,40 @@ class Graph<T> implements NodeIO<T> {
   /// Adds a [Node] to the graph.
   /// Alias to [node].
   @override
-  Node<T>? addOutput(T nodeValue) => node(nodeValue);
+  Node<T>? addOutput(T nodeValue) => addInput(nodeValue);
 
   /// Returns a [Node] with [value] or creates it.
   Node<T> node(T value) => _allNodes[value] ??= Node(value, graph: this);
 
   /// Returns a [Node] with [value] or `null` if not present.
-  Node<T>? getNode(T value) => _allNodes[value];
+  Node<T>? getNode(T? value) {
+    if (value == null) return null;
+    return _allNodes[value];
+  }
+
+  /// Returns a list of [Node] with [values] or `null` for absent nodes.
+  Iterable<Node<T>?> getNodesNullable(Iterable<T> values) =>
+      values.map((v) => getNode(v));
+
+  /// Returns a list of [Node] with [values] present.
+  Iterable<Node<T>> getNodes(Iterable<T> values) =>
+      values.map((v) => getNode(v)).whereNotNull();
 
   /// Alias to [getNode].
   Node<T>? operator [](T value) => getNode(value);
+
+  /// Maps [values] to [Node]s in this graph.
+  /// - If [createNodes] is `false` will throw a [StateError] if the node is not present in this graph.
+  Iterable<Node<T>> valuesToNodes(Iterable<T> values,
+      {bool createNodes = false}) {
+    if (createNodes) {
+      return values.map((value) => node(value));
+    } else {
+      return values.map((value) =>
+          getNode(value) ??
+          (throw StateError("Can't find node with value: $value")));
+    }
+  }
 
   /// Returns a [Node] with [value] or creates it as always root.
   Node<T> root(T value) {
@@ -363,11 +515,15 @@ class Graph<T> implements NodeIO<T> {
   List<Node<T>> get roots =>
       _allNodes.values.where((e) => e.isRoot).toList(growable: false);
 
+  /// Returns a list of root values (without inputs).
+  List<T> get rootValues => roots.map((e) => e.value).toList(growable: false);
+
   /// Returns a list of nodes market as targets.
   List<Node<T>> get targets =>
       _allNodes.values.where((e) => e.isTarget).toList(growable: false);
 
-  /// Resets this graph for a path scan.
+  /// Resets this graph and all its [Node]s for a path scan.
+  /// See [Node.reset].
   @override
   void reset() {
     for (var node in _allNodes.values) {
@@ -387,99 +543,32 @@ class Graph<T> implements NodeIO<T> {
   }
 
   /// Returns a [Map] representation of this graph.
-  Map<K, dynamic> toTree<K>({K Function(T value)? keyCast}) {
+  Map<K, dynamic> toTree<K>(
+      {K Function(T value)? keyCast,
+      bool sortByInputDependency = false,
+      bool bfs = false}) {
     var rootValues = roots.map((e) => e.value).toList();
-    return toTreeFrom<K>(rootValues, keyCast: keyCast);
+    return toTreeFrom<K>(rootValues,
+        keyCast: keyCast,
+        sortByInputDependency: sortByInputDependency,
+        bfs: bfs);
   }
 
   /// Returns a [Map] representation of this graph from [roots].
-  Map<K, dynamic> toTreeFrom<K>(List<T> roots, {K Function(T value)? keyCast}) {
-    if (keyCast == null) {
-      if (K == String) {
-        keyCast = (v) => v.toString() as K;
-      } else if (K == Node || K == <Node<T>>[].genericType) {
-        keyCast = (v) => getNode(v) as K;
-      } else {
-        keyCast = (v) => v as K;
-      }
-    }
-
-    Map<K, dynamic> Function() createNode = K == dynamic
-        ? () => (<T, dynamic>{} as Map<K, dynamic>)
-        : () => <K, dynamic>{};
-
-    Map<K, Map<K, dynamic>> allTreeNodes = K == dynamic
-        ? (<T, Map<T, dynamic>>{} as Map<K, Map<K, dynamic>>)
-        : <K, Map<K, dynamic>>{};
-
-    Map<K, dynamic> tree =
-        K == dynamic ? (<T, dynamic>{} as Map<K, dynamic>) : <K, dynamic>{};
-
-    var processedNode = <Node<T>>{};
-    var queue = ListQueue<Node<T>>();
-
-    for (var root in roots) {
-      var rootNode = getNode(root) ??
-          (throw ArgumentError("Root not present in graph: $root"));
-
-      assert(rootNode.value == root);
-
-      processedNode.add(rootNode);
-      queue.add(rootNode);
-
-      var rootK = keyCast(root);
-
-      tree[rootK] ??= allTreeNodes[rootK] ??= createNode();
-    }
-
-    while (queue.isNotEmpty) {
-      var node = queue.removeFirst();
-
-      var nodeK = keyCast(node.value);
-
-      var treeNode = allTreeNodes[nodeK] ??= createNode();
-
-      for (var child in node._outputs) {
-        var childValue = child.value;
-        var childK = keyCast(childValue);
-
-        dynamic ref;
-
-        var childTreeNode = allTreeNodes[childValue];
-        if (childTreeNode == null) {
-          childTreeNode = allTreeNodes[childK] = createNode();
-          ref = childTreeNode;
-        } else {
-          ref = childValue;
-        }
-
-        treeNode[childK] ??= ref;
-
-        if (processedNode.add(child)) {
-          queue.add(child);
-        }
-      }
-    }
-
-    return tree;
+  Map<K, dynamic> toTreeFrom<K>(List<T> roots,
+      {K Function(T value)? keyCast,
+      bool sortByInputDependency = false,
+      bool bfs = false}) {
+    return GraphWalker<T>(
+            sortByInputDependency: sortByInputDependency, bfs: bfs)
+        .toTreeFrom<K>(roots,
+            nodeProvider: (s, v) => getNode(v),
+            outputsProvider: (s, n) => n._outputs);
   }
 
   /// Returns a JSON representation of this graph.
-  Map<String, dynamic> toJson() => toTree<String>();
-
-  /// Returns an [ASCIIArtTree] of this graph.
-  ASCIIArtTree toASCIIArtTree(
-      {String? stripPrefix,
-      String? stripSuffix,
-      ASCIIArtTreeStyle style = ASCIIArtTreeStyle.elegant,
-      bool allowGraphs = true}) {
-    var tree = toTree<String>();
-    return ASCIIArtTree(tree,
-        stripPrefix: stripPrefix,
-        stripSuffix: stripSuffix,
-        style: style,
-        allowGraphs: allowGraphs);
-  }
+  Map<String, dynamic> toJson({bool sortByInputDependency = false}) =>
+      toTree<String>(sortByInputDependency: sortByInputDependency);
 
   /// Scans and returns the paths from [root] to [target].
   Future<GraphScanResult<T>> scanPathsFrom(T root, T target,
@@ -493,7 +582,7 @@ class Graph<T> implements NodeIO<T> {
       {bool? findAll}) {
     findAll ??= roots.length > 1 || targets.length > 1;
     var scanner = GraphScanner<T>(findAll: findAll);
-    return scanner.scanPathsFromMany(roots, MultipleNodesEquals(targets),
+    return scanner.scanPathsFromMany(roots, NodeMatcher.eq(targets),
         graph: this);
   }
 
@@ -543,6 +632,179 @@ class Graph<T> implements NodeIO<T> {
     var paths = await this.allPaths;
     return paths.shortestPaths();
   }
+
+  /// Populates this graph with [entries].
+  /// - [inputsProvider]: provides the inputs of an entry.
+  /// - [outputsProvider]: provides the outputs of an entry.
+  R? populate<R>(
+    Iterable<T> entries, {
+    GraphWalkNodeProvider<T>? nodeProvider,
+    GraphWalkOutputsProvider<T>? inputsProvider,
+    GraphWalkOutputsProvider<T>? outputsProvider,
+    GraphWalkNodeProcessor<T, R>? process,
+    int maxExpansion = 3,
+    bool bfs = false,
+  }) {
+    nodeProvider ??= (s, e) => this.node(e);
+    inputsProvider ??= (s, e) => [];
+    outputsProvider ??= (s, e) => [];
+
+    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: bfs);
+
+    return graphWalker.walk<R>(
+      entries,
+      nodeProvider: nodeProvider,
+      outputsProvider: outputsProvider,
+      process: (step) {
+        var node = step.node;
+        var nodeValue = node.value;
+
+        var outputs = outputsProvider!(step, nodeValue) ?? [];
+        for (var child in outputs) {
+          node.addOutput(child);
+        }
+
+        var inputs = inputsProvider!(step, nodeValue) ?? [];
+        for (var dep in inputs) {
+          node.addInput(dep);
+        }
+
+        if (process == null) {
+          return null;
+        }
+
+        var ret = process(step);
+        return ret;
+      },
+    );
+  }
+
+  Future<R?> populateAsync<R>(
+    Iterable<T> entries, {
+    GraphWalkNodeProviderAsync<T>? nodeProvider,
+    GraphWalkOutputsProviderAsync<T>? inputsProvider,
+    GraphWalkOutputsProviderAsync<T>? outputsProvider,
+    GraphWalkNodeProcessorAsync<T, R>? process,
+    int maxExpansion = 3,
+    bool bfs = false,
+  }) async {
+    nodeProvider ??= (s, e) => this.node(e);
+    inputsProvider ??= (s, e) => [];
+    outputsProvider ??= (s, e) => [];
+
+    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: bfs);
+
+    return graphWalker.walkAsync<R>(
+      entries,
+      nodeProvider: nodeProvider,
+      outputsProvider: outputsProvider,
+      process: (step) async {
+        var node = step.node;
+        var nodeValue = node.value;
+
+        var outputs = await outputsProvider!(step, nodeValue) ?? [];
+        for (var child in outputs) {
+          node.addOutput(child);
+        }
+
+        var inputs = await inputsProvider!(step, nodeValue) ?? [];
+        for (var dep in inputs) {
+          node.addInput(dep);
+        }
+
+        if (process == null) {
+          return null;
+        }
+
+        var ret = await process(step);
+        return ret;
+      },
+    );
+  }
+
+  /// Walk the graph nodes outputs starting [from] and stopping at [stopMatcher] (if provided).
+  R? walkOutputsFrom<R>(
+    Iterable<T> from,
+    GraphWalkNodeProcessor<T, R> process, {
+    NodeMatcher<T>? stopMatcher,
+    bool processRoots = true,
+    int maxExpansion = 1,
+    bool bfs = false,
+  }) =>
+      GraphWalker<T>(
+        stopMatcher: stopMatcher,
+        processRoots: processRoots,
+        maxExpansion: maxExpansion,
+        bfs: bfs,
+      ).walkByNodes<R>(
+        valuesToNodes(from),
+        process: process,
+        outputsProvider: (step, node) => node._outputs,
+      );
+
+  /// Walk the graph nodes inputs starting [from] and stopping at [stopMatcher] (if provided).
+  R? walkInputsFrom<R>(
+    Iterable<T> from,
+    GraphWalkNodeProcessor<T, R> process, {
+    NodeMatcher<T>? stopMatcher,
+    bool processRoots = true,
+    int maxExpansion = 1,
+    bool bfs = false,
+  }) =>
+      GraphWalker<T>(
+        stopMatcher: stopMatcher,
+        processRoots: processRoots,
+        maxExpansion: maxExpansion,
+        bfs: bfs,
+      ).walkByNodes<R>(
+        valuesToNodes(from),
+        process: process,
+        outputsProvider: (step, node) => node._inputs,
+      );
+
+  /// Walk the graph nodes outputs starting [from] and stopping at [stopMatcher] (if provided).
+  List<Node<T>> walkOutputsOrderFrom<R>(
+    Iterable<T> from, {
+    NodeMatcher<T>? stopMatcher,
+    bool processRoots = true,
+    int maxExpansion = 1,
+    bool expandSideRoots = false,
+    bool sortByInputDependency = false,
+    bool bfs = false,
+  }) =>
+      GraphWalker<T>(
+        stopMatcher: stopMatcher,
+        processRoots: processRoots,
+        maxExpansion: maxExpansion,
+        sortByInputDependency: sortByInputDependency,
+        bfs: bfs,
+      ).walkOrder(
+        from.toList(),
+        nodeProvider: (step, nodeValue) => getNode(nodeValue),
+        outputsProvider: (step, node) => node._outputs,
+        expandSideBranches: expandSideRoots,
+      );
+
+  /// Walk the graph nodes outputs starting [from] and stopping at [stopMatcher] (if provided).
+  List<Node<T>> walkInputsOrderFrom<R>(
+    Iterable<T> from, {
+    NodeMatcher<T>? stopMatcher,
+    bool processRoots = true,
+    int maxExpansion = 1,
+    bool sortByInputDependency = false,
+    bool bfs = false,
+  }) =>
+      GraphWalker<T>(
+        stopMatcher: stopMatcher,
+        processRoots: processRoots,
+        maxExpansion: maxExpansion,
+        sortByInputDependency: sortByInputDependency,
+        bfs: bfs,
+      ).walkOrder(
+        from.toList(),
+        nodeProvider: (step, nodeValue) => node(nodeValue),
+        outputsProvider: (step, node) => node._inputs,
+      );
 }
 
 /// A [Graph] [Node].
@@ -588,6 +850,10 @@ class Node<T> extends NodeIO<T> {
     g?.dispose();
   }
 
+  /// Temporary attachment to associate with this node.
+  /// See [reset] and [Graph.reset].
+  dynamic attachment;
+
   bool _target = false;
 
   /// Marks this node as a target.
@@ -605,7 +871,7 @@ class Node<T> extends NodeIO<T> {
   List<Node<T>> get outputs => _outputs;
 
   /// Return the outputs values of this node.
-  List<T> get outputsValues => _outputs.map((e) => e.value).toList();
+  List<T> get outputsValues => _outputs.toListOfValues();
 
   /// Returns `true` if [outputs] contains [node].
   bool containsOutputNode(Node<T> node) => _outputs.contains(node);
@@ -711,7 +977,7 @@ class Node<T> extends NodeIO<T> {
   List<Node<T>> get inputs => _inputs;
 
   /// Return the inputs values of this node.
-  List<T> get inputsValues => _inputs.map((e) => e.value).toList();
+  List<T> get inputsValues => _inputs.toListOfValues();
 
   /// Returns `true` if [node] is a [inputs].
   bool containsInputNode(Node<T> node) => _inputs.contains(node);
@@ -791,28 +1057,205 @@ class Node<T> extends NodeIO<T> {
     return node;
   }
 
+  /// Returns `true` if [targetValue] is an input of this node.
+  bool isInput(T targetValue) => isInputNode(_resolveNode(targetValue));
+
   /// Returns `true` if [target] is an input of this node.
-  bool isInput(Node target) {
-    if (this == target) return true;
+  bool isInputNode(Node<T> target) {
+    if (this == target) return false;
 
-    var processedNode = <Node<T>>{this};
-    var queue = ListQueue<Node<T>>()..add(this);
+    var graphWalker = GraphWalker<T>(
+      stopMatcher: NodeEquals<T>(target.value),
+    );
 
-    while (queue.isNotEmpty) {
-      var node = queue.removeFirst();
+    return graphWalker.walkByNodes<bool>(
+          [this],
+          outputsProvider: (step, node) => node._inputs,
+          process: (step) =>
+              step.node == target ? GraphWalkingInstruction.result(true) : null,
+        ) ??
+        false;
+  }
 
-      for (var p in node._inputs) {
-        if (p == target) {
-          return true;
+  /// Returns `true` if [targetValue] is an output of this node.
+  bool isOutput(T targetValue) => isOutputNode(_resolveNode(targetValue));
+
+  /// Returns `true` if [target] is an output of this node.
+  bool isOutputNode(Node<T> target) {
+    if (this == target) return false;
+
+    var graphWalker = GraphWalker<T>(
+      stopMatcher: NodeEquals<T>(target.value),
+    );
+
+    return graphWalker.walkByNodes<bool>(
+          [this],
+          outputsProvider: (step, node) => node._outputs,
+          process: (step) =>
+              step.node == target ? GraphWalkingInstruction.result(true) : null,
+        ) ??
+        false;
+  }
+
+  /// Returns all the [outputs] in depth, scanning all the [outputs] of [outputs].
+  List<Node<T>> outputsInDepth(
+      {int? maxDepth, bool bfs = false, Iterable<Node<T>>? ignore}) {
+    final allNodes = <Node<T>>[];
+
+    var initialProcessedNodes = ignore != null
+        ? Map.fromEntries(ignore.map((e) => MapEntry(e, 1)))
+        : null;
+
+    var graphWalker = GraphWalker<T>(
+      processRoots: false,
+      bfs: bfs,
+      initialProcessedNodes: initialProcessedNodes,
+    );
+
+    graphWalker.walkByNodes<bool>(
+      [this],
+      outputsProvider: (step, node) => node._outputs,
+      process: (step) {
+        allNodes.add(step.node);
+        return null;
+      },
+      maxDepth: maxDepth,
+    );
+
+    return allNodes;
+  }
+
+  /// Returns all the [inputs] in depth, scanning all the [inputs] of [inputs].
+  List<Node<T>> inputsInDepth(
+      {int? maxDepth, bool bfs = false, Iterable<Node<T>>? ignore}) {
+    final allNodes = <Node<T>>[];
+
+    var initialProcessedNodes = ignore != null
+        ? Map.fromEntries(ignore.map((e) => MapEntry(e, 1)))
+        : null;
+
+    var graphWalker = GraphWalker<T>(
+      processRoots: false,
+      bfs: bfs,
+      initialProcessedNodes: initialProcessedNodes,
+    );
+
+    graphWalker.walkByNodes<bool>(
+      [this],
+      outputsProvider: (step, node) => node._inputs,
+      process: (step) {
+        allNodes.add(step.node);
+        return null;
+      },
+      maxDepth: maxDepth,
+    );
+
+    return allNodes;
+  }
+
+  List<Node<T>> roots({bool bfs = false}) {
+    final roots = <Node<T>>[];
+
+    var graphWalker = GraphWalker<T>(
+      processRoots: false,
+      bfs: bfs,
+    );
+
+    graphWalker.walkByNodes<bool>(
+      [this],
+      outputsProvider: (step, node) => node._inputs,
+      process: (step) {
+        var node = step.node;
+        if (node.isRoot) {
+          roots.add(node);
         }
+        return null;
+      },
+    );
 
-        if (processedNode.add(p)) {
-          queue.add(p);
-        }
-      }
+    return roots;
+  }
+
+  List<Node<T>> outputsInDepthIntersection(Node<T>? other) {
+    var l2 = other?.outputsInDepth();
+    if (l2 == null || l2.isEmpty) return [];
+
+    var l1 = outputsInDepth();
+    return l1.intersection(l2);
+  }
+
+  List<Node<T>> inputsInDepthIntersection(Node<T>? other) {
+    var l2 = other?.inputsInDepth();
+    if (l2 == null || l2.isEmpty) return [];
+
+    var l1 = inputsInDepth();
+    return l1.intersection(l2);
+  }
+
+  /// Return the list of side roots after this [Node].
+  /// - A side root is a root [Node] that is not common to the [roots] of this [Node],
+  ///   but is common to the in depth [outputs]'s [roots] of this [Node].
+  ///   It's the [complement] of [roots] and [outputsInDepth]'s [roots].
+  List<Node<T>> sideRoots({int? maxDepth}) {
+    var myRoots = roots();
+
+    var outputs = outputsInDepth(maxDepth: maxDepth).toList(growable: false);
+
+    var outputsRoots =
+        outputs.expand((e) => e.roots()).toSet().toList(growable: false);
+
+    var complement = myRoots.complement(outputsRoots, includeThis: false);
+    complement.remove(this);
+
+    return complement;
+  }
+
+  /// Returns all the dependencies.
+  /// - A dependency [Node] is all the [inputs] of all the in depth [outputs] (respecting [maxDepth]).
+  /// - If [includeThisInputs] is `true`, also include the [inputs] of this [Node],
+  ///   other wise will use only the [inputs] of the in depth [outputs].
+  List<Node<T>> dependencies(
+      {bool includeThisInputs = true,
+      int? maxDepth,
+      Iterable<Node<T>>? ignore}) {
+    ignore =
+        ignore is List<Node<T>> ? ignore : (ignore?.toList() ?? <Node<T>>[]);
+
+    Iterable<Node<T>> outputs;
+    if (maxDepth != null && maxDepth == 1) {
+      outputs = ignore.isNotEmpty
+          ? this.outputs.where((e) => !ignore!.contains(e))
+          : this.outputs;
+    } else {
+      outputs = outputsInDepth(maxDepth: maxDepth, ignore: ignore);
     }
 
-    return false;
+    var outputsDependencies = outputs
+        .where((e) => e != this)
+        .expand((e) => e.inputsInDepth(ignore: ignore));
+
+    var dependencies = <Node<T>>[
+      if (includeThisInputs) ...inputsInDepth(),
+      ...outputsDependencies
+    ].where((e) => e != this).toSet().toList();
+
+    return dependencies;
+  }
+
+  /// Returns all the missing [dependencies] not present in the [knownDependencies] parameter.
+  List<Node<T>> missingDependencies(Iterable<Node<T>> knownDependencies,
+      {int? maxDepth}) {
+    knownDependencies = knownDependencies is List<Node<T>>
+        ? knownDependencies
+        : knownDependencies.toList();
+
+    var allDependencies =
+        this.dependencies(ignore: knownDependencies, maxDepth: maxDepth);
+
+    var missingDependencies =
+        allDependencies.where((e) => !knownDependencies.contains(e)).toList();
+
+    return missingDependencies;
   }
 
   /// Returns `true` if [target] is an input in the [shortestPathToRoot].
@@ -837,55 +1280,58 @@ class Node<T> extends NodeIO<T> {
       [this]
     ];
 
-    final processedNodes = <Node<T>>{};
-    final queue = ListQueue<Node<T>>()..add(this);
-
     final computingPathsIdxRet = <int>[0];
     var expandCursor = 0;
 
-    while (queue.isNotEmpty) {
-      var node = queue.removeFirst();
+    var graphWalker = GraphWalker<T>();
 
-      var computingPaths = _getComputingPaths(
-          computingPathsBuffer, node, expandCursor, computingPathsIdxRet);
+    var shortestPath = graphWalker.walkByNodes<List<Node<T>>>(
+      [this],
+      outputsProvider: (step, node) {
+        var inputs = node._inputs;
+        return inputs.isEmpty ? [] : [inputs.first];
+      },
+      process: (step) {
+        var node = step.node;
 
-      if (computingPaths == null) continue;
+        var computingPaths = _getComputingPaths<T>(
+            computingPathsBuffer, node, expandCursor, computingPathsIdxRet);
 
-      var computingPathsIdx = computingPathsIdxRet[0];
+        if (computingPaths == null) return null;
 
-      if (node.isRoot) {
-        // [computingPaths] of [node] completed.
-        // Return one of the shortest path (1st):
-        return computingPaths.first;
-      }
+        var computingPathsIdx = computingPathsIdxRet[0];
 
-      var newNode = processedNodes.add(node);
-      if (!newNode) {
-        // Only computing the shortest branch:
-        continue;
-      }
+        if (node.isRoot) {
+          // [computingPaths] of [node] completed.
+          // Return one of the shortest path (1st):
+          return GraphWalkingInstruction.result(computingPaths.first);
+        }
 
-      var inputs = node._inputs;
+        // In a BFS the 1st input will be one of the closest to root,
+        // don't need to expand with all the inputs:
+        var closerToRoot = node._inputs.first;
 
-      // In a BFS the 1st input will be one of the closest to root,
-      // don't need to expand with all the inputs:
-      var closerToRoot = inputs.first;
-      inputs = [closerToRoot];
+        var inputs = [closerToRoot];
 
-      expandCursor = _expandComputingPaths(computingPathsBuffer, computingPaths,
-          computingPathsIdx, inputs, expandCursor);
+        expandCursor = _expandComputingPaths<T>(computingPathsBuffer,
+            computingPaths, computingPathsIdx, inputs, expandCursor);
 
-      queue.add(closerToRoot);
+        return null;
+      },
+    );
+
+    if (shortestPath == null) {
+      throw StateError("No path to root from: $value");
     }
 
-    throw StateError("No path to root.");
+    return shortestPath;
   }
 
   /// Resolves all the paths to the root from this node.
   ///
   /// The algorithm tries to remove meaningless
   /// nodes, such as branches that only exist due to indirect self-references.
-  List<List<Node<T>>> resolveAllPathsToRoot() {
+  List<List<Node<T>>> resolveAllPathsToRoot({int maxExpansion = 3}) {
     var rootPaths = <List<Node<T>>>[];
 
     // A buffer on paths being computed until the root:
@@ -893,81 +1339,80 @@ class Node<T> extends NodeIO<T> {
       [this]
     ];
 
-    // Count the number of times that a node was processed:
-    final processedNodesCounter = <Node<T>, int>{};
-
-    final queue = ListQueue<Node<T>>()..add(this);
-
     final computingPathsIdxRet = <int>[0];
     var expandCursor = 0;
 
-    while (queue.isNotEmpty) {
-      var node = queue.removeFirst();
+    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: true);
 
-      var computingPaths = _getComputingPaths(
-          computingPathsBuffer, node, expandCursor, computingPathsIdxRet);
+    graphWalker.walkByNodes<List<Node<T>>>(
+      [this],
+      outputsProvider: (step, node) => node._inputs,
+      process: (step) {
+        var node = step.node;
 
-      if (computingPaths == null) continue;
+        var computingPaths = _getComputingPaths<T>(
+            computingPathsBuffer, node, expandCursor, computingPathsIdxRet);
 
-      var computingPathsIdx = computingPathsIdxRet[0];
-      var computingPathsEndIdx = computingPathsIdx + computingPaths.length;
+        if (computingPaths == null) return null;
 
-      if (node.isRoot) {
-        // [computingPaths] of [node] completed,
-        // remove it from [computingPathsBuffer].
-        computingPathsBuffer.removeRange(
-            computingPathsIdx, computingPathsEndIdx);
+        var computingPathsIdx = computingPathsIdxRet[0];
+        var computingPathsEndIdx = computingPathsIdx + computingPaths.length;
 
-        rootPaths.addAll(computingPaths);
-        expandCursor = computingPathsIdx;
+        if (node.isRoot) {
+          // [computingPaths] of [node] completed,
+          // remove it from [computingPathsBuffer].
+          computingPathsBuffer.removeRange(
+              computingPathsIdx, computingPathsEndIdx);
 
-        // Allow independent branches to be computed:
-        processedNodesCounter[node] = 0;
-        continue;
-      }
+          rootPaths.addAll(computingPaths);
+          expandCursor = computingPathsIdx;
 
-      // Increment the processed node counter for [node]:
-      final nodeProcessCount =
-          processedNodesCounter.update(node, (c) => c + 1, ifAbsent: () => 1);
-
-      final newNode = nodeProcessCount == 1;
-
-      // Skip target nodes (leafs with `target == true`)
-      // already processed (avoids self-reference):
-      if (node.isTarget && !newNode) {
-        continue;
-      }
-
-      var inputs = node._inputs;
-
-      if (!newNode) {
-        var unprocessed =
-            inputs.where((e) => !processedNodesCounter.containsKey(e)).toList();
-
-        // Not all inputs are unprocessed:
-        if (unprocessed.length < inputs.length) {
-          // Allow inputs that are not targets (leaves with `matches`)
-          // or that are [unprocessed].
-          var allowedIts =
-              inputs.where((e) => !e.isTarget || unprocessed.contains(e));
-
-          // Ensure that inputs processed more than 3 times are skipped,
-          // to avoid infinite loops or meaningless branches already seen:
-          allowedIts =
-              allowedIts.where((e) => (processedNodesCounter[e] ?? 0) <= 3);
-
-          var allowed = allowedIts.toList();
-
-          // Only expand with allowed inputs:
-          inputs = allowed;
+          // Allow independent branches to be computed:
+          // Reset counter to 0:
+          return GraphWalkingInstruction.setExpansionCounter(0);
         }
-      }
 
-      expandCursor = _expandComputingPaths(computingPathsBuffer, computingPaths,
-          computingPathsIdx, inputs, expandCursor);
+        final processed = step.processed;
 
-      queue.addAll(inputs);
-    }
+        final newNode = processed[node] == 1;
+
+        // Skip target nodes (leafs with `target == true`)
+        // already processed (avoids self-reference):
+        if (node.isTarget && !newNode) {
+          return null;
+        }
+
+        var inputs = node._inputs;
+
+        if (!newNode) {
+          var unprocessed =
+              inputs.where((e) => !processed.containsKey(e)).toList();
+
+          // Not all inputs are unprocessed:
+          if (unprocessed.length < inputs.length) {
+            // Allow inputs that are not targets (leaves with `matches`)
+            // or that are [unprocessed].
+            var allowedIts =
+                inputs.where((e) => !e.isTarget || unprocessed.contains(e));
+
+            // Ensure that inputs processed more than 3 times are skipped,
+            // to avoid infinite loops or meaningless branches already seen:
+            allowedIts =
+                allowedIts.where((e) => (processed[e] ?? 0) <= maxExpansion);
+
+            var allowed = allowedIts.toList();
+
+            // Only expand with allowed inputs:
+            inputs = allowed;
+          }
+        }
+
+        expandCursor = _expandComputingPaths(computingPathsBuffer,
+            computingPaths, computingPathsIdx, inputs, expandCursor);
+
+        return null;
+      },
+    );
 
     return rootPaths;
   }
@@ -981,7 +1426,7 @@ class Node<T> extends NodeIO<T> {
   ///   the [node] computing paths should be. See [_expandComputingPaths].
   /// - The [node[ computing paths are the ones where the 1st element is [node].
   // Change `computingPathIdx` to records when moving to Dart 3:
-  List<List<Node<T>>>? _getComputingPaths(
+  static List<List<Node<T>>>? _getComputingPaths<T>(
       List<List<Node<T>>> computingPathsBuffer,
       Node node,
       int expandCursor,
@@ -1008,7 +1453,7 @@ class Node<T> extends NodeIO<T> {
 
   /// Expands the computing paths of [node],
   /// [computingPathsBuffer]
-  int _expandComputingPaths(
+  static int _expandComputingPaths<T>(
       List<List<Node<T>>> computingPathsBuffer,
       List<List<Node<T>>> computingPaths,
       int computingPathsIdx,
@@ -1038,9 +1483,11 @@ class Node<T> extends NodeIO<T> {
   }
 
   /// Resets this node for a path scan.
+  /// Clears [_target] and [attachment].
   @override
   void reset() {
     _target = false;
+    attachment = null;
   }
 
   @override
@@ -1070,15 +1517,194 @@ class Node<T> extends NodeIO<T> {
 }
 
 extension IterableNodeExtension<T> on Iterable<Node<T>> {
-  List<T> toListOfValues() => map((e) => e.value).toList();
+  Iterable<T> toIterableOfValues() => map((e) => e.value);
 
-  List<String> toListOfString() => map((e) => e.value.toString()).toList();
+  Iterable<String> toIterableOfString() => map((e) => e.value.toString());
+
+  List<T> toListOfValues() => toIterableOfValues().toList();
+
+  List<String> toListOfString() => toIterableOfString().toList();
 
   /// Dispose the graph of all the [Node]s.
   void disposeGraph() {
     for (var e in this) {
       e.disposeGraph();
     }
+  }
+
+  List<Node<T>> merge(List<Node<T>> other) {
+    if (identical(this, other)) return toList();
+
+    if (isEmpty) {
+      return other.isEmpty ? [] : other.toList();
+    } else if (other.isEmpty) {
+      return toList();
+    }
+
+    var merge = {...this, ...other}.toList();
+    return merge;
+  }
+
+  List<Node<T>> intersection(List<Node<T>> other) {
+    if (identical(this, other)) return toList();
+    if (isEmpty || other.isEmpty) return [];
+
+    var intersection = where((e) => other.contains(e)).toList();
+    return intersection;
+  }
+
+  List<Node<T>> complement(
+    List<Node<T>> other, {
+    bool includeThis = true,
+    bool includeOther = true,
+  }) {
+    if (identical(this, other)) return [];
+
+    if (isEmpty) return includeOther ? other.toList() : [];
+    if (other.isEmpty) return includeThis ? toList() : [];
+
+    var complement = [
+      if (includeThis) ...where((e) => !other.contains(e)),
+      if (includeOther) ...other.where((e) => !contains(e)),
+    ];
+
+    return complement;
+  }
+
+  Map<Node<T>, List<Node<T>>> outputsInDepth(
+          {int? maxDepth, bool bfs = false}) =>
+      Map<Node<T>, List<Node<T>>>.fromEntries(map(
+          (e) => MapEntry(e, e.outputsInDepth(maxDepth: maxDepth, bfs: bfs))));
+
+  Map<Node<T>, List<Node<T>>> inputsInDepth(
+          {int? maxDepth, bool bfs = false}) =>
+      Map<Node<T>, List<Node<T>>>.fromEntries(map(
+          (e) => MapEntry(e, e.inputsInDepth(maxDepth: maxDepth, bfs: bfs))));
+
+  List<Node<T>> outputsInDepthIntersection({int? maxDepth, bool bfs = false}) {
+    var intersection = outputsInDepth(maxDepth: maxDepth, bfs: bfs)
+        .values
+        .reduce((intersection, l) => intersection.intersection(l));
+    return intersection;
+  }
+
+  List<Node<T>> inputsInDepthIntersection({int? maxDepth, bool bfs = false}) {
+    var intersection = inputsInDepth(maxDepth: maxDepth, bfs: bfs)
+        .values
+        .reduce((intersection, l) => intersection.intersection(l));
+    return intersection;
+  }
+
+  List<Node<T>> sortedByOutputsDepth({bool bfs = false}) {
+    var nodesOutputs = outputsInDepth(bfs: bfs);
+
+    var entries = nodesOutputs.entries.toList();
+
+    entries.sort((a, b) => a.value.length.compareTo(b.value.length));
+
+    var nodes = entries.keys.toList();
+    return nodes;
+  }
+
+  List<Node<T>> sortedByInputDepth({bool bfs = false}) {
+    var nodesInputs = inputsInDepth(bfs: bfs);
+
+    var entries = nodesInputs.entries.toList();
+
+    entries.sort((a, b) => a.value.length.compareTo(b.value.length));
+
+    var nodes = entries.keys.toList();
+    return nodes;
+  }
+
+  List<Node<T>> sortedByOutputDependency({int? maxDepth, bool bfs = false}) {
+    var nodesOutputs = outputsInDepth(maxDepth: maxDepth, bfs: bfs);
+
+    var nodesOutputsEntries = nodesOutputs.entries.toList();
+
+    var alone = nodesOutputsEntries.where((e) => e.value.isEmpty).keys.toList();
+
+    alone = alone.sortedByInputDepth();
+
+    if (alone.length == nodesOutputsEntries.length) {
+      return alone;
+    }
+
+    nodesOutputsEntries.removeWhere((e) => alone.contains(e.key));
+
+    var entriesIntersections = nodesOutputsEntries.map((e) {
+      var entriesOutputs = e.value;
+      var others = nodesOutputsEntries.where((e2) => e2 != e);
+
+      var intersections = others
+          .map((other) =>
+              MapEntry(other.key, entriesOutputs.intersection(other.value)))
+          .where((other) => other.value.isNotEmpty);
+
+      return MapEntry(e.key, Map.fromEntries(intersections));
+    }).toList();
+
+    var isolated =
+        entriesIntersections.where((e) => e.value.isEmpty).keys.toList();
+
+    nodesOutputsEntries.removeWhere((e) => isolated.contains(e.key));
+
+    isolated = isolated.sortedByOutputsDepth().toReversedList(growable: false);
+
+    var sideRoots = nodesOutputsEntries
+        .map((e) => MapEntry(e.key, e.key.sideRoots()))
+        .toList();
+
+    var withoutSideRoots =
+        sideRoots.where((e) => e.value.isEmpty).keys.toList(growable: false);
+
+    nodesOutputsEntries.removeWhere((e) => withoutSideRoots.contains(e.key));
+
+    var rest = nodesOutputsEntries.keys.sortedByOutputsDepth().toReversedList();
+
+    var nodes = [...alone, ...isolated, ...withoutSideRoots, ...rest].toList();
+    return nodes;
+  }
+
+  List<Node<T>> sortedByInputDependency({int? maxDepth, bool bfs = false}) {
+    var nodesInputs = inputsInDepth(bfs: bfs);
+
+    var nodesInputsEntries = nodesInputs.entries.toList();
+
+    var directRoots =
+        nodesInputsEntries.where((e) => e.value.isEmpty).keys.toList();
+
+    directRoots = directRoots.sortedByOutputDependency(maxDepth: maxDepth);
+
+    if (directRoots.length == nodesInputsEntries.length) {
+      return directRoots;
+    }
+
+    nodesInputsEntries.removeWhere((e) => directRoots.contains(e.key));
+
+    var entriesIntersections = nodesInputsEntries.map((e) {
+      var entryInputs = e.value;
+      var otherEntries = nodesInputsEntries.where((e2) => e2 != e);
+
+      var intersections = otherEntries
+          .map((other) =>
+              MapEntry(other.key, entryInputs.intersection(other.value)))
+          .where((other) => other.value.isNotEmpty);
+
+      return MapEntry(e.key, Map.fromEntries(intersections));
+    }).toList();
+
+    var isolated =
+        entriesIntersections.where((e) => e.value.isEmpty).keys.toList();
+
+    nodesInputsEntries.removeWhere((e) => isolated.contains(e.key));
+
+    isolated = isolated.sortedByOutputsDepth().toReversedList(growable: false);
+
+    var rest = nodesInputsEntries.keys.sortedByOutputsDepth().toReversedList();
+
+    var nodes = [...directRoots, ...isolated, ...rest].toList();
+    return nodes;
   }
 }
 
@@ -1153,5 +1779,25 @@ extension IterableOfListNodeExtension<T> on Iterable<List<Node<T>>> {
 }
 
 extension _ListTypeExtension<T> on List<T> {
-  Type get genericType => T;
+  List<T> toReversedList({bool growable = true}) =>
+      reversed.toList(growable: growable);
+}
+
+extension MapNodeExtension<T, V> on Map<Node<T>, V> {
+  Map<T, V> toMapOfNodeValues() =>
+      map((node, value) => MapEntry(node.value, value));
+}
+
+extension MapListNodeExtension<K, T> on Map<K, List<Node<T>>> {
+  Map<K, List<T>> toMapOfListOfValues() =>
+      map((key, l) => MapEntry(key, l.map((node) => node.value).toList()));
+}
+
+extension MapNodeListNodeExtension<T> on Map<Node<T>, List<Node<T>>> {
+  Map<T, List<T>> toMapOfValues() => map(
+      (key, l) => MapEntry(key.value, l.map((node) => node.value).toList()));
+}
+
+extension _MapExtension<K, V> on Iterable<MapEntry<K, V>> {
+  Iterable<K> get keys => map((e) => e.key);
 }
