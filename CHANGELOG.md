@@ -1,3 +1,10 @@
+## 1.0.2
+
+- `GraphWalker`:
+  - Added `extractAllEntries`.
+- `Graph.fromJson`:
+  - `maxExpansion` computed from `GraphWalker.extractAllEntries`.
+
 ## 1.0.1
 
 - Added `AnyNode` and `NoneNode`.

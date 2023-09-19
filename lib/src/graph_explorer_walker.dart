@@ -836,6 +836,31 @@ class GraphWalker<T> {
     return tree;
   }
 
+  /// Extract in depth all the entries of [map].
+  static List<MapEntry<K, V>> extractAllEntries<K, V>(Map<K, V> map,
+      {MapEntry<K, V> Function(MapEntry e)? entryCaster, bool bfs = false}) {
+    entryCaster ??= K == String
+        ? (e) => MapEntry<K, V>(e.key.toString() as K, e.value)
+        : (e) => MapEntry<K, V>(e.key, e.value);
+
+    var all = <MapEntry<K, V>>[];
+
+    var graphWalker = GraphWalker<MapEntry<K, V>>(bfs: bfs);
+
+    graphWalker.walk(map.entries,
+        nodeProvider: (s, v) => Node(v),
+        outputsProvider: (s, e) {
+          var val = e.value;
+          return val is Map ? val.entries.map(entryCaster!) : null;
+        },
+        process: (s) {
+          all.add(s.nodeValue);
+          return null;
+        });
+
+    return all;
+  }
+
   @override
   String toString() {
     return 'GraphWalker{bfs: $bfs, maxExpansion: $maxExpansion, processRoots: $processRoots, sortByInputDependency: $sortByInputDependency, stopMatcher: $stopMatcher, processedNodes: ${_processedNodes.length}, maxProcessedExpansion: $maxProcessedExpansion}';

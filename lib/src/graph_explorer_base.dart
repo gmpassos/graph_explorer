@@ -385,11 +385,14 @@ class Graph<T> implements NodeIO<T> {
       }
     }
 
+    var allEntries = GraphWalker.extractAllEntries(json);
+    var maxExpansion = allEntries.length + 1;
+
     final graph = Graph<T>();
 
     graph.populate(
       json.keys.map((k) => nodeValueMapper!(null, k)),
-      maxExpansion: 999999999,
+      maxExpansion: maxExpansion,
       nodeProvider: (step, nodeValue) {
         var node = graph.node(nodeValue);
 

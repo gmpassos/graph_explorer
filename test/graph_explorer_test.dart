@@ -1523,6 +1523,25 @@ void main() {
               ['a', 'x', 'y', 'z', 'f']
             ]));
   });
+
+  group('GraphWalker', () {
+    test('extractAllEntries', () {
+      var allEntries = GraphWalker.extractAllEntries<String, dynamic>({
+        'a': {
+          'b': {'c': null, 'd': null}
+        }
+      });
+
+      expect(
+          allEntries.map((e) => '${e.key}: ${e.value}'),
+          equals([
+            'a: {b: {c: null, d: null}}',
+            'b: {c: null, d: null}',
+            'c: null',
+            'd: null'
+          ]));
+    });
+  });
 }
 
 Future<GraphWalker<String>> doWalkerTest<R>(
