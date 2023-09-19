@@ -212,9 +212,13 @@ class GraphScanner<T> {
   ///
   /// The paths should start at [from] and end at a node that matches [targetMatcher].
   Future<GraphScanResult<T>> scanPathsFrom(T from, NodeMatcher<T> targetMatcher,
-      {Graph<T>? graph, NodesProvider<T>? outputsProvider}) async {
+      {Graph<T>? graph,
+      NodesProvider<T>? outputsProvider,
+      int maxExpansion = 3}) async {
     return scanPathsFromMany([from], targetMatcher,
-        graph: graph, outputsProvider: outputsProvider);
+        graph: graph,
+        outputsProvider: outputsProvider,
+        maxExpansion: maxExpansion);
   }
 
   /// Performs a scan and returns the found node paths.
@@ -223,7 +227,9 @@ class GraphScanner<T> {
   /// matches [targetMatcher].
   Future<GraphScanResult<T>> scanPathsFromMany(
       List<T> fromMany, NodeMatcher<T> targetMatcher,
-      {Graph<T>? graph, NodesProvider<T>? outputsProvider}) async {
+      {Graph<T>? graph,
+      NodesProvider<T>? outputsProvider,
+      int maxExpansion = 3}) async {
     var initTime = DateTime.now();
 
     GraphWalkingInstruction<bool>? processTarget(GraphNodeStep<T> step) {
@@ -260,7 +266,9 @@ class GraphScanner<T> {
       }
 
       await graph.populateAsync(fromMany,
-          outputsProvider: nodeOutputsProvider, process: processTarget);
+          outputsProvider: nodeOutputsProvider,
+          process: processTarget,
+          maxExpansion: maxExpansion);
     } else {
       if (graph.isEmpty && outputsProvider == null) {
         return GraphScanResult(graph, fromMany, targetMatcher, [],
@@ -277,7 +285,7 @@ class GraphScanner<T> {
           : (GraphNodeStep<T> step, Node<T> node) => node._outputs;
 
       await GraphWalker<T>(
-        maxExpansion: 3,
+        maxExpansion: maxExpansion,
         bfs: true,
       ).walkByNodesAsync<bool>(
         graph.valuesToNodes(fromMany, createNodes: true),
@@ -290,7 +298,7 @@ class GraphScanner<T> {
 
     var targets = graph.targets;
 
-    var paths = _resolvePaths(targets);
+    var paths = _resolvePaths(targets, maxExpansion);
 
     if (!findAll) {
       paths = paths.shortestPaths();
@@ -304,9 +312,10 @@ class GraphScanner<T> {
         findAll: findAll, time: time, resolvePathsTime: timePaths);
   }
 
-  List<List<Node<T>>> _resolvePaths(List<Node<T>> targets) {
+  List<List<Node<T>>> _resolvePaths(List<Node<T>> targets, int maxExpansion) {
     var pathsItr = findAll
-        ? targets.expand((e) => e.resolveAllPathsToRoot())
+        ? targets
+            .expand((e) => e.resolveAllPathsToRoot(maxExpansion: maxExpansion))
         : targets.map((e) => e.shortestPathToRoot);
 
     var paths = pathsItr.toList();
@@ -1322,7 +1331,7 @@ class Node<T> extends NodeIO<T> {
   ///
   /// The algorithm tries to remove meaningless
   /// nodes, such as branches that only exist due to indirect self-references.
-  List<List<Node<T>>> resolveAllPathsToRoot() {
+  List<List<Node<T>>> resolveAllPathsToRoot({int maxExpansion = 3}) {
     var rootPaths = <List<Node<T>>>[];
 
     // A buffer on paths being computed until the root:
@@ -1333,7 +1342,7 @@ class Node<T> extends NodeIO<T> {
     final computingPathsIdxRet = <int>[0];
     var expandCursor = 0;
 
-    var graphWalker = GraphWalker<T>(maxExpansion: 3);
+    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: true);
 
     graphWalker.walkByNodes<List<Node<T>>>(
       [this],
@@ -1388,7 +1397,8 @@ class Node<T> extends NodeIO<T> {
 
             // Ensure that inputs processed more than 3 times are skipped,
             // to avoid infinite loops or meaningless branches already seen:
-            allowedIts = allowedIts.where((e) => (processed[e] ?? 0) <= 3);
+            allowedIts =
+                allowedIts.where((e) => (processed[e] ?? 0) <= maxExpansion);
 
             var allowed = allowedIts.toList();
 
