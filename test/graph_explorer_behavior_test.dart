@@ -303,6 +303,29 @@ void main() {
       },
     );
 
+    test('DFS with maxDepth >= 2: a node first reached deeper (pinned)', () {
+      // a -> b -> c -> d, a -> c: `d` is at distance 2 (a -> c -> d), but a
+      // DFS reaches `c` first at depth 2 (through `b`), so `d` (depth 3 there)
+      // is not walked, and `c` is not expanded again at depth 1.
+      var g = Graph<String>();
+      g.node('a')
+        ..addOutput('b')
+        ..addOutput('c');
+      g.node('b').addOutput('c');
+      g.node('c').addOutput('d');
+
+      var a = g.node('a');
+      expect(
+        a.outputsInDepth(maxDepth: 2).toListOfValues(),
+        equals(['b', 'c']),
+      );
+      // A BFS reaches every node at its shortest distance first:
+      expect(
+        a.outputsInDepth(maxDepth: 2, bfs: true).toListOfValues(),
+        equals(['b', 'c', 'd']),
+      );
+    });
+
     test('sideRoots(maxDepth: 1) sees every direct output', () {
       // a -> b -> c, a -> c, x -> c: `x` is a side root of `a`.
       var g = _shortcut();

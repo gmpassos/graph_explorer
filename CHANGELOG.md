@@ -6,6 +6,8 @@
     Affects `walk`, `walkAsync`, `walkByNodes`, `walkByNodesAsync` and `walkOrder`,
     and so `Node.outputsInDepth` / `inputsInDepth` / `sideRoots` with `maxDepth`
     (e.g. `outputsInDepth(maxDepth: 1)` now returns every direct output).
+    A DFS with `maxDepth >= 2` can still miss a node whose ancestor was reached first
+    at a deeper level; use `bfs: true` for an exact depth limit.
 - New tests: coverage 98.4% -> 99.4%.
   - Property tests over seeded random graphs (DAGs, cycles, self-loops, diamonds,
     long chains, disconnected components): scanner paths vs. brute-force path
@@ -15,7 +17,7 @@
   - Integration test querying a package dependency graph loaded from JSON.
   - Pins of current behaviour: tied siblings reversed with `sortByInputDependency`,
     `Node.root` depth, scan paths resolved back to the graph roots,
-    `shortestPathToRoot` following the 1st input.
+    `shortestPathToRoot` following the 1st input, DFS `maxDepth >= 2`.
 
 ## 1.1.1
 

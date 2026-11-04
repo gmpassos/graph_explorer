@@ -490,6 +490,24 @@ void main() {
             reason: reason,
           );
 
+          // BFS with `maxDepth`: the nodes up to that distance.
+          var dist = _distances(adj, [v]);
+          for (var maxDepth in [1, 2, 3]) {
+            expect(
+              node
+                  .outputsInDepth(maxDepth: maxDepth, bfs: true)
+                  .toListOfValues()
+                  .toSet(),
+              equals(
+                dist.entries
+                    .where((e) => e.value >= 1 && e.value <= maxDepth)
+                    .map((e) => e.key)
+                    .toSet(),
+              ),
+              reason: '$reason ; maxDepth: $maxDepth',
+            );
+          }
+
           for (var other in g.allNodes) {
             var o = other.value;
             expect(
