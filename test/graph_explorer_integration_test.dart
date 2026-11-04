@@ -173,11 +173,11 @@ void main() {
       );
       var paths = result.paths.toListOfStringPaths();
 
-      // The paths are resolved back to the graph roots, so the paths through
-      // `my_cli` (which also depends on `http`) are included too:
+      // Only the paths from `my_app` (not through `my_cli`, which also
+      // depends on `http`), sorted by length:
       expect(
-        paths.toSet(),
-        equals({
+        paths,
+        equals([
           ['my_app', 'http', 'http_parser', 'source_span', 'term_glyph'],
           [
             'my_app',
@@ -187,20 +187,18 @@ void main() {
             'source_span',
             'term_glyph',
           ],
-          ['my_cli', 'http', 'http_parser', 'source_span', 'term_glyph'],
-          [
-            'my_cli',
-            'http',
-            'http_parser',
-            'string_scanner',
-            'source_span',
-            'term_glyph',
-          ],
-        }),
+        ]),
       );
-      expect(paths.where((p) => p.first == 'my_app'), hasLength(2));
-      expect(result.paths.longestPaths(), hasLength(2));
-      expect(result.toString(), contains('paths: 4'));
+      expect(result.paths.longestPaths(), hasLength(1));
+      expect(result.toString(), contains('paths: 2'));
+
+      var fromCli = await graph.scanPathsFrom(
+        'my_cli',
+        'term_glyph',
+        findAll: true,
+      );
+      expect(fromCli.paths.map((p) => p.first.value).toSet(), {'my_cli'});
+      expect(fromCli.paths, hasLength(2));
     });
 
     test('scanPathsMatching: the closest of several packages', () async {
@@ -211,7 +209,6 @@ void main() {
         paths.toListOfStringPaths(),
         equals([
           ['my_app', 'logging'],
-          ['my_cli', 'logging'],
         ]),
       );
 

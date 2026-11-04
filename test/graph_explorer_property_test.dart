@@ -51,6 +51,16 @@ Adjacency _randomGraph(
   );
 }
 
+/// An arbitrary random directed graph over `0..n-1`: any number of roots
+/// (including none), cycles, self-loops and unreachable components.
+Adjacency _randomDigraph(Random r, int n, {double p = 0.25}) => {
+  for (var i = 0; i < n; i++)
+    i: [
+      for (var j = 0; j < n; j++)
+        if (r.nextDouble() < (j == i ? 0.1 : p)) j,
+    ],
+};
+
 /// Several independent [_randomGraph] components. Roots: `0, 100, 200, ...`.
 Adjacency _randomComponents(Random r, int count, {bool cycles = false}) => {
   for (var c = 0; c < count; c++)
@@ -181,7 +191,7 @@ void main() {
               var expected = _pathsKeys(_simplePaths(adj, 0, t));
 
               var result = await GraphScanner<int>(findAll: true)
-                  .scanPathsFrom(0, NodeEquals(t), graph: g, maxExpansion: 100);
+                  .scanPathsFrom(0, NodeEquals(t), graph: g);
 
               var paths = result.paths.toListOfValuePaths();
               expect(
@@ -203,68 +213,189 @@ void main() {
       }
     }
 
-    test(
-      'default maxExpansion: a subset that has all the shortest paths',
-      () async {
-        await _forSeeds(40, (seed, r) async {
-          var n = 3 + r.nextInt(5);
-          var adj = _randomGraph(r, n, cycles: seed.isOdd);
-          var g = _build(adj);
+    for (var bfs in [true, false]) {
+      test(
+        'any digraph, any (from, target) pair (populated with bfs: $bfs)',
+        () async {
+          await _forSeeds(60, (seed, r) async {
+            var n = 2 + r.nextInt(6);
+            var adj = _randomDigraph(r, n);
+            // Populated from every node: also the nodes in rootless cycles.
+            var g = _build(adj, roots: adj.keys.toList(), bfs: bfs);
 
-          for (var t = 1; t < n; t++) {
-            var all = _simplePaths(adj, 0, t);
-            var minLength = all.map((p) => p.length).reduce(min);
-            var shortest = _pathsKeys(all.where((p) => p.length == minLength));
+            for (var from = 0; from < n; from++) {
+              var dist = _distances(adj, [from]);
 
-            var paths = _pathsKeys(
-              (await g.scanPathsFrom(
-                0,
-                t,
+              for (var t = 0; t < n; t++) {
+                var reason =
+                    'seed: $seed ; from: $from ; target: $t ; adj: $adj';
+                var expected = _simplePaths(adj, from, t);
+
+                // findAll: every simple path from `from` (and only them):
+                var all = await g.scanPathsFrom(from, t, findAll: true);
+                var paths = all.paths.toListOfValuePaths();
+                expect(
+                  _pathsKeys(paths),
+                  equals(_pathsKeys(expected)),
+                  reason: reason,
+                );
+                expect(paths.length, equals(expected.length), reason: reason);
+                for (var p in all.paths) {
+                  _expectValidPath(p, from, t);
+                }
+                // Sorted by length:
+                expect(
+                  paths.map((p) => p.length).toList(),
+                  equals(paths.map((p) => p.length).toList()..sort()),
+                  reason: reason,
+                );
+
+                // findAll: false: one of the shortest paths.
+                var shortest = await g.scanPathsFrom(from, t);
+                if (expected.isEmpty) {
+                  expect(shortest.paths, isEmpty, reason: reason);
+                  expect(
+                    await g.shortestPathsFrom(from, t, findAll: true),
+                    isEmpty,
+                    reason: reason,
+                  );
+                  continue;
+                }
+
+                expect(shortest.paths, hasLength(1), reason: reason);
+                expect(
+                  shortest.paths.first.length,
+                  equals(dist[t]! + 1),
+                  reason: reason,
+                );
+                _expectValidPath(shortest.paths.first, from, t);
+
+                var minLength = expected.map((p) => p.length).reduce(min);
+                var shortestKeys = _pathsKeys(
+                  expected.where((p) => p.length == minLength),
+                );
+                expect(
+                  _pathsKeys(
+                    (await g.shortestPathsFrom(from, t)).toListOfValuePaths(),
+                  ),
+                  everyElement(isIn(shortestKeys)),
+                  reason: reason,
+                );
+                expect(
+                  _pathsKeys(
+                    (await g.shortestPathsFrom(
+                      from,
+                      t,
+                      findAll: true,
+                    )).toListOfValuePaths(),
+                  ),
+                  equals(shortestKeys),
+                  reason: reason,
+                );
+                // Only the shortest are enumerated, in the same order:
+                expect(
+                  (await g.shortestPathsFrom(
+                    from,
+                    t,
+                    findAll: true,
+                  )).toListOfValuePaths(),
+                  equals(all.paths.shortestPaths().toListOfValuePaths()),
+                  reason: reason,
+                );
+              }
+
+              // Many targets (and many starts):
+              var targets = [
+                for (var t = 0; t < n; t++)
+                  if (t != from) t,
+              ];
+              var starts = {from, (from + 1) % n}.toList();
+              var allMany = await g.scanPathsFromMany(
+                starts,
+                targets,
                 findAll: true,
-              )).paths.toListOfValuePaths(),
-            );
+              );
+              var expectedMany = [
+                for (var s in starts)
+                  for (var t in targets) ..._simplePaths(adj, s, t),
+              ];
+              expect(
+                _pathsKeys(allMany.paths.toListOfValuePaths()),
+                equals(_pathsKeys(expectedMany)),
+                reason: 'seed: $seed ; from: $starts ; adj: $adj',
+              );
+              expect(
+                (await g.shortestPathsFromMany(
+                  starts,
+                  targets,
+                  findAll: true,
+                )).toListOfValuePaths(),
+                equals(allMany.paths.shortestPaths().toListOfValuePaths()),
+                reason: 'seed: $seed ; from: $starts ; adj: $adj',
+              );
+              expect(
+                (await g.shortestPathsMatching(
+                  starts,
+                  NodeMatcher.eq(targets),
+                )).toListOfValuePaths(),
+                equals(allMany.paths.shortestPaths().toListOfValuePaths()),
+              );
+            }
+          });
+        },
+      );
+    }
 
-            var reason = 'seed: $seed ; target: $t ; adj: $adj';
-            expect(_pathsKeys(all).containsAll(paths), isTrue, reason: reason);
-            expect(paths.containsAll(shortest), isTrue, reason: reason);
+    for (var bfs in [true, false]) {
+      test(
+        'shortestPathToRoot / depth / resolveAllPathsToRoot (populated with bfs: $bfs)',
+        () async {
+          await _forSeeds(60, (seed, r) async {
+            var n = 2 + r.nextInt(7);
+            var adj = seed.isEven
+                ? _randomDigraph(r, n)
+                : _randomGraph(r, n, cycles: true);
+            var g = _build(adj, roots: adj.keys.toList(), bfs: bfs);
+            var roots = _rootsOf(adj);
+            var dist = _distances(adj, roots);
 
-            var shortestAll = await g.shortestPathsFrom(0, t, findAll: true);
-            expect(
-              _pathsKeys(shortestAll.toListOfValuePaths()),
-              equals(shortest),
-              reason: reason,
-            );
-          }
-        });
-      },
-    );
+            for (var node in g.allNodes) {
+              var v = node.value;
+              var reason = 'seed: $seed ; node: $v ; adj: $adj';
 
-    test('shortest path (findAll: false) on a BFS populated graph', () async {
-      await _forSeeds(40, (seed, r) async {
-        var n = 3 + r.nextInt(6);
-        var adj = _randomGraph(r, n, cycles: seed.isOdd);
-        var g = _build(adj);
-        var dist = _distances(adj, [0]);
+              var allToRoot = [
+                for (var root in roots) ..._simplePaths(adj, root, v),
+              ];
+              expect(
+                _pathsKeys(node.resolveAllPathsToRoot().toListOfValuePaths()),
+                equals(_pathsKeys(allToRoot)),
+                reason: reason,
+              );
 
-        for (var t = 1; t < n; t++) {
-          var reason = 'seed: $seed ; target: $t ; adj: $adj';
+              var d = dist[v];
+              if (d == null) {
+                expect(() => node.depth, throwsStateError, reason: reason);
+                expect(
+                  () => node.shortestPathToRoot,
+                  throwsStateError,
+                  reason: reason,
+                );
+                continue;
+              }
 
-          var paths = await g.shortestPathsFrom(0, t);
-          expect(paths, hasLength(1), reason: reason);
-          expect(paths.first.length, equals(dist[t]! + 1), reason: reason);
-          _expectValidPath(paths.first, 0, t);
-
-          var node = g.getNode(t)!;
-          expect(node.depth, equals(dist[t]! + 1), reason: reason);
-          expect(
-            node.shortestPathToRoot.toListOfValues(),
-            equals(paths.first.toListOfValues()),
-            reason: reason,
-          );
-          expect(node.isInputInShortestPathToRoot(g.getNode(0)!), isTrue);
-        }
-      });
-    });
+              expect(node.depth, equals(d + 1), reason: reason);
+              var path = node.shortestPathToRoot;
+              expect(path, hasLength(d + 1), reason: reason);
+              expect(path.first.isRoot, isTrue, reason: reason);
+              _expectValidPath(path, path.first.value, v);
+              expect(node.isInputInShortestPathToRoot(path.first), isTrue);
+              // Cached:
+              expect(node.shortestPathToRoot, same(path));
+            }
+          });
+        },
+      );
+    }
 
     test('scanPathsFromMany over disconnected components', () async {
       await _forSeeds(30, (seed, r) async {
@@ -284,12 +415,8 @@ void main() {
             ..._pathsKeys(_simplePaths(adj, t ~/ 100 * 100, t)),
         };
 
-        var result = await GraphScanner<int>(findAll: true).scanPathsFromMany(
-          roots,
-          NodeMatcher.eq(targets),
-          graph: g,
-          maxExpansion: 100,
-        );
+        var result = await GraphScanner<int>(findAll: true)
+            .scanPathsFromMany(roots, NodeMatcher.eq(targets), graph: g);
 
         expect(
           _pathsKeys(result.paths.toListOfValuePaths()),
@@ -308,27 +435,56 @@ void main() {
           var adj = _randomGraph(r, n, cycles: seed.isOdd);
           var built = _build(adj);
 
-          for (var t = 1; t < n; t++) {
-            var fromBuilt = await GraphScanner<int>(
-              findAll: true,
-            ).scanPathsFrom(0, NodeEquals(t), graph: built, maxExpansion: 100);
+          for (var from in [0, n ~/ 2]) {
+            for (var t = 1; t < n; t++) {
+              var reason = 'seed: $seed ; from: $from ; target: $t ; adj: $adj';
 
-            var fromProvider = await GraphScanner<int>(findAll: true)
-                .scanPathsFrom(
-                  0,
-                  NodeEquals(t),
-                  outputsProvider: (graph, node) async {
-                    await Future<void>.delayed(Duration.zero);
-                    return adj[node.value]!.map(graph.node).toList();
-                  },
-                  maxExpansion: 100,
+              for (var findAll in [true, false]) {
+                var fromBuilt = await GraphScanner<int>(findAll: findAll)
+                    .scanPathsFrom(from, NodeEquals(t), graph: built);
+
+                Future<List<Node<int>>> provider(
+                  Graph<int> graph,
+                  Node<int> node,
+                ) async {
+                  await Future<void>.delayed(Duration.zero);
+                  return adj[node.value]!.map(graph.node).toList();
+                }
+
+                // Populating a new graph:
+                var fromProvider = await GraphScanner<int>(
+                  findAll: findAll,
+                ).scanPathsFrom(from, NodeEquals(t), outputsProvider: provider);
+
+                // Over an empty graph, with the provider:
+                var fromGraphProvider =
+                    await GraphScanner<int>(findAll: findAll).scanPathsFrom(
+                      from,
+                      NodeEquals(t),
+                      graph: Graph<int>()..node(from),
+                      outputsProvider: provider,
+                    );
+
+                var expected = fromBuilt.paths.toListOfValuePaths();
+                if (findAll) {
+                  expect(
+                    _pathsKeys(expected),
+                    equals(_pathsKeys(_simplePaths(adj, from, t))),
+                    reason: reason,
+                  );
+                }
+                expect(
+                  fromProvider.paths.toListOfValuePaths(),
+                  equals(expected),
+                  reason: reason,
                 );
-
-            expect(
-              _pathsKeys(fromProvider.paths.toListOfValuePaths()),
-              equals(_pathsKeys(fromBuilt.paths.toListOfValuePaths())),
-              reason: 'seed: $seed ; target: $t ; adj: $adj',
-            );
+                expect(
+                  fromGraphProvider.paths.toListOfValuePaths(),
+                  equals(expected),
+                  reason: reason,
+                );
+              }
+            }
           }
         });
       },
@@ -355,7 +511,7 @@ void main() {
 
         for (var t = 1; t < n; t++) {
           var result = await GraphScanner<int>(findAll: true)
-              .scanPathsFrom(0, NodeEquals(t), graph: g, maxExpansion: 100);
+              .scanPathsFrom(0, NodeEquals(t), graph: g);
           expect(
             _pathsKeys(result.paths.toListOfValuePaths()),
             equals(_pathsKeys(_simplePaths(adj, 0, t))),
@@ -381,8 +537,9 @@ void main() {
         var g = _build(adj);
         var expectedCount = pow(2, k).toInt();
 
+        // The default (no `maxExpansion` cap) finds all the paths:
         var all = await GraphScanner<int>(findAll: true)
-            .scanPathsFrom(0, NodeEquals(last), graph: g, maxExpansion: 100);
+            .scanPathsFrom(0, NodeEquals(last), graph: g);
         expect(all.paths, hasLength(expectedCount));
         expect(
           _pathsKeys(all.paths.toListOfValuePaths()),
@@ -397,19 +554,27 @@ void main() {
         expect(all.paths.shortestPaths(), hasLength(expectedCount));
         expect(all.paths.longestPaths(), hasLength(expectedCount));
 
-        // The default `maxExpansion` (3) bounds how many times a node is
-        // expanded, so with many paths through the same node only a subset
-        // is found (all of them for k <= 2):
         var paths = await g.shortestPathsFrom(0, last, findAll: true);
-        expect(paths, isNotEmpty);
+        expect(
+          _pathsKeys(paths.toListOfValuePaths()),
+          equals(_pathsKeys(all.paths.toListOfValuePaths())),
+        );
+        expect(await g.allPaths, hasLength(expectedCount));
+        expect(
+          g.getNode(last)!.resolveAllPathsToRoot(),
+          hasLength(expectedCount),
+        );
+
+        // An explicit `maxExpansion` caps the enumeration:
+        var capped = await GraphScanner<int>(findAll: true)
+            .scanPathsFrom(0, NodeEquals(last), graph: g, maxExpansion: 1);
+        expect(capped.paths, isNotEmpty);
         expect(
           _pathsKeys(all.paths.toListOfValuePaths()),
-          containsAll(_pathsKeys(paths.toListOfValuePaths())),
+          containsAll(_pathsKeys(capped.paths.toListOfValuePaths())),
         );
-        if (k <= 2) {
-          expect(paths, hasLength(expectedCount));
-        } else {
-          expect(paths.length, lessThan(expectedCount));
+        if (k >= 2) {
+          expect(capped.paths.length, lessThan(expectedCount));
         }
 
         expect(g.getNode(last)!.depth, equals(2 * k + 1));
@@ -490,22 +655,54 @@ void main() {
             reason: reason,
           );
 
-          // BFS with `maxDepth`: the nodes up to that distance.
+          // BFS and DFS with `maxDepth`: the nodes up to that distance
+          // (each once).
           var dist = _distances(adj, [v]);
-          for (var maxDepth in [1, 2, 3]) {
-            expect(
-              node
-                  .outputsInDepth(maxDepth: maxDepth, bfs: true)
-                  .toListOfValues()
-                  .toSet(),
-              equals(
-                dist.entries
-                    .where((e) => e.value >= 1 && e.value <= maxDepth)
-                    .map((e) => e.key)
-                    .toSet(),
-              ),
-              reason: '$reason ; maxDepth: $maxDepth',
-            );
+          var revDist = _distances(rev, [v]);
+          for (var bfs in [true, false]) {
+            for (var maxDepth in [1, 2, 3, 4]) {
+              Set<int> upTo(Map<int, int> dist) => dist.entries
+                  .where((e) => e.value >= 1 && e.value <= maxDepth)
+                  .map((e) => e.key)
+                  .toSet();
+
+              var outs = node
+                  .outputsInDepth(maxDepth: maxDepth, bfs: bfs)
+                  .toListOfValues();
+              expect(
+                outs.toSet(),
+                equals(upTo(dist)),
+                reason: '$reason ; maxDepth: $maxDepth ; bfs: $bfs',
+              );
+              expect(outs.length, equals(outs.toSet().length));
+
+              var ins = node
+                  .inputsInDepth(maxDepth: maxDepth, bfs: bfs)
+                  .toListOfValues();
+              expect(
+                ins.toSet(),
+                equals(upTo(revDist)),
+                reason: '$reason ; maxDepth: $maxDepth ; bfs: $bfs',
+              );
+              expect(ins.length, equals(ins.toSet().length));
+
+              // The DFS order is kept: a node is visited after one of its
+              // inputs (or the start node).
+              if (!bfs) {
+                for (var i = 0; i < outs.length; i++) {
+                  var inputs = g.getNode(outs[i])!.inputsValues;
+                  expect(
+                    inputs.contains(v) ||
+                        inputs.any((e) {
+                          var j = outs.indexOf(e);
+                          return j >= 0 && j < i;
+                        }),
+                    isTrue,
+                    reason: '$reason ; maxDepth: $maxDepth',
+                  );
+                }
+              }
+            }
           }
 
           for (var other in g.allNodes) {
@@ -757,36 +954,53 @@ void main() {
 
         for (var bfs in [false, true]) {
           for (var maxExpansion in [1, 2]) {
-            var walker = GraphWalker<int>(bfs: bfs, maxExpansion: maxExpansion);
+            for (var maxDepth in [null, 1, 2]) {
+              var walker = GraphWalker<int>(
+                bfs: bfs,
+                maxExpansion: maxExpansion,
+              );
 
-            var syncSteps = <String>[];
-            var syncRet = walker.walk<int>(
-              [0],
-              nodeProvider: (s, v) => g.getNode(v),
-              outputsProvider: (s, v) => adj[v],
-              process: (s) {
-                syncSteps.add('${s.depth}:${s.nodeValue}');
-                return null;
-              },
-            );
-            var syncProcessed = Map.of(walker.processedNodes);
+              var syncSteps = <String>[];
+              var syncRet = walker.walk<int>(
+                [0],
+                nodeProvider: (s, v) => g.getNode(v),
+                outputsProvider: (s, v) => adj[v],
+                process: (s) {
+                  syncSteps.add('${s.depth}:${s.nodeValue}');
+                  return null;
+                },
+                maxDepth: maxDepth,
+              );
+              var syncProcessed = Map.of(walker.processedNodes);
 
-            walker.reset();
+              walker.reset();
 
-            var asyncSteps = <String>[];
-            var asyncRet = await walker.walkAsync<int>(
-              [0],
-              nodeProvider: (s, v) async => g.getNode(v),
-              outputsProvider: (s, v) => Future.value(adj[v]),
-              process: (s) async {
-                asyncSteps.add('${s.depth}:${s.nodeValue}');
-                return null;
-              },
-            );
+              var asyncSteps = <String>[];
+              var asyncRet = await walker.walkAsync<int>(
+                [0],
+                nodeProvider: (s, v) async => g.getNode(v),
+                outputsProvider: (s, v) => Future.value(adj[v]),
+                process: (s) async {
+                  asyncSteps.add('${s.depth}:${s.nodeValue}');
+                  return null;
+                },
+                maxDepth: maxDepth,
+              );
 
-            expect(asyncSteps, equals(syncSteps));
-            expect(asyncRet, equals(syncRet));
-            expect(walker.processedNodes, equals(syncProcessed));
+              expect(asyncSteps, equals(syncSteps));
+              expect(asyncRet, equals(syncRet));
+              expect(walker.processedNodes, equals(syncProcessed));
+
+              if (maxDepth != null) {
+                // Every node within `maxDepth` is processed:
+                var dist = _distances(adj, [0]);
+                expect(
+                  syncSteps.map((e) => int.parse(e.split(':')[1])).toSet(),
+                  equals(dist.keys.where((k) => dist[k]! <= maxDepth).toSet()),
+                  reason: 'seed: $seed ; maxDepth: $maxDepth ; adj: $adj',
+                );
+              }
+            }
           }
         }
       });
@@ -830,6 +1044,44 @@ void main() {
             expect(syncRet, isNotNull);
             if (bfs) {
               expect(syncRet, equals(_distances(adj, [0])[target]));
+            }
+
+            // With `maxDepth` (re-expansions in a DFS):
+            for (var maxDepth in [1, 2, 3]) {
+              var syncDepth = <String>[];
+              walker().walkByNodes<int>(
+                [g.getNode(0)!],
+                outputsProvider: (s, n) => n.outputs,
+                process: (s) {
+                  syncDepth.add('${s.depth}:${s.nodeValue}');
+                  return null;
+                },
+                maxDepth: maxDepth,
+              );
+              var asyncDepth = <String>[];
+              await walker().walkByNodesAsync<int>(
+                [g.getNode(0)!],
+                outputsProvider: (s, n) async => n.outputs,
+                process: (s) async {
+                  asyncDepth.add('${s.depth}:${s.nodeValue}');
+                  return null;
+                },
+                maxDepth: maxDepth,
+              );
+              expect(asyncDepth, equals(syncDepth));
+              expect(
+                GraphWalker<int>(bfs: bfs, maxExpansion: maxExpansion)
+                    .walkOrder(
+                      [0],
+                      nodeProvider: (s, v) => g.getNode(v),
+                      outputsProvider: (s, n) => n.outputs,
+                      maxDepth: maxDepth,
+                    )
+                    .toListOfValues(),
+                equals(
+                  syncDepth.map((e) => int.parse(e.split(':')[1])).toSet(),
+                ),
+              );
             }
           }
         }
@@ -915,7 +1167,7 @@ void main() {
         var adj = _randomGraph(r, n, cycles: seed.isOdd);
         var g = _build(adj);
         var result = await GraphScanner<int>(findAll: true)
-            .scanPathsFrom(0, NodeEquals(n - 1), graph: g, maxExpansion: 100);
+            .scanPathsFrom(0, NodeEquals(n - 1), graph: g);
         var paths = result.paths;
         var lengths = paths.map((p) => p.length).toList();
         var minLength = lengths.reduce(min);
