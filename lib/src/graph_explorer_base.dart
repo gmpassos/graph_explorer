@@ -429,15 +429,29 @@ class Graph<T> implements NodeIO<T> {
 
     final graph = Graph<T>();
 
+    // The JSON keys are always `String`s, but the node values are `T`.
+    // Looking up a JSON node by its node value only works when `T` is
+    // `String`, so track which JSON key each node value was mapped from,
+    // per parent (`null` for the roots).
+    final jsonKeys = <T?, Map<T, String>>{};
+
+    T mapKey(GraphStep<T>? step, T? parentValue, String key) {
+      var value = nodeValueMapper!(step, key);
+      (jsonKeys[parentValue] ??= <T, String>{})[value] = key;
+      return value;
+    }
+
     graph.populate(
-      json.keys.map((k) => nodeValueMapper!(null, k)),
+      json.keys.map((k) => mapKey(null, null, k)).toList(),
       maxExpansion: maxExpansion,
       nodeProvider: (step, nodeValue) {
         var node = graph.node(nodeValue);
 
-        var parentNode = graph.getNode(step.parentValue);
+        var parentValue = step.parentValue;
+        var parentNode = graph.getNode(parentValue);
         Map parentJsonNode = parentNode?.attachment ?? json;
-        var jsonNode = parentJsonNode[nodeValue];
+        var jsonKey = jsonKeys[parentValue]?[nodeValue];
+        var jsonNode = parentJsonNode[jsonKey ?? nodeValue];
 
         var nodeAttachment = node.attachment;
         if (nodeAttachment == null) {
@@ -453,7 +467,9 @@ class Graph<T> implements NodeIO<T> {
               node.attachment = jsonNode;
             }
           } else if (jsonNode is String) {
-            if (jsonNode != nodeValue.toString()) {
+            if (jsonNode != jsonKey &&
+                jsonNode != nodeValue.toString() &&
+                nodeValueMapper!(step, jsonNode) != nodeValue) {
               throw StateError(
                 "Invalid node reference: $nodeValue -> $jsonNode",
               );
@@ -470,9 +486,9 @@ class Graph<T> implements NodeIO<T> {
       outputsProvider: (step, nodeValue) {
         var jsonNode = graph.getNode(nodeValue)?.attachment;
         if (jsonNode is! Map || jsonNode.isEmpty) return null;
-        var outputs = jsonNode.keys.map(
-          (k) => nodeValueMapper!(step, k.toString()),
-        );
+        var outputs = jsonNode.keys
+            .map((k) => mapKey(step, nodeValue, k.toString()))
+            .toList();
         return outputs;
       },
     );
@@ -620,6 +636,7 @@ class Graph<T> implements NodeIO<T> {
       roots,
       nodeProvider: (s, v) => getNode(v),
       outputsProvider: (s, n) => n._outputs,
+      keyCast: keyCast == null ? null : (s, v) => keyCast(v),
     );
   }
 
