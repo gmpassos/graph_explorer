@@ -206,6 +206,44 @@ void main() {
       expect(nodeTree.keys.single.value, equals(1));
     });
 
+    test('toTree / toTreeFrom (keyCast)', () {
+      var g = _diamond();
+
+      expect(
+        g.toTree<String>(keyCast: (v) => v.toUpperCase()),
+        equals({
+          'A': {
+            'B': {
+              'D': {'E': null},
+            },
+            'C': {'D': 'D'},
+          },
+        }),
+      );
+
+      expect(
+        g.toTreeFrom<String>(['b'], keyCast: (v) => '<$v>'),
+        equals({
+          '<b>': {
+            '<d>': {'<e>': null},
+          },
+        }),
+      );
+
+      var gInt = Graph<int>()
+        ..node(1).addOutput(2)
+        ..node(2).addOutput(3);
+
+      expect(
+        gInt.toTree<String>(keyCast: (v) => 'n$v'),
+        equals({
+          'n1': {
+            'n2': {'n3': null},
+          },
+        }),
+      );
+    });
+
     test('toTreeFrom (missing root)', () {
       var g = _diamond();
       expect(() => g.toTreeFrom<String>(['z']), throwsArgumentError);
@@ -236,6 +274,59 @@ void main() {
       });
 
       expect(g.node('c').outputsValues, unorderedEquals(['d', 'e']));
+    });
+
+    test('fromJson (non-String node type)', () {
+      var json = {
+        '1': {
+          '2': {'4': null},
+          '3': {'4': '4'},
+        },
+      };
+
+      var g = Graph<int>.fromJson(
+        json,
+        nodeValueMapper: (s, k) => int.parse(k),
+      );
+
+      expect(g.allNodesValues, unorderedEquals([1, 2, 3, 4]));
+      expect(g.rootValues, equals([1]));
+      expect(g.node(1).outputsValues, equals([2, 3]));
+      expect(g.node(2).outputsValues, equals([4]));
+      expect(g.node(3).outputsValues, equals([4]));
+      expect(g.node(4).inputsValues, unorderedEquals([2, 3]));
+
+      // Round-trip back to the same JSON:
+      expect(g.toJson(), equals(json));
+    });
+
+    test('fromJson (non-String node type, merged definitions)', () {
+      var g = Graph<int>.fromJson({
+        '1': {
+          '3': {'4': null},
+        },
+        '2': {
+          '3': {'5': null},
+        },
+      }, nodeValueMapper: (s, k) => int.parse(k));
+
+      expect(g.node(3).outputsValues, unorderedEquals([4, 5]));
+      expect(g.node(3).inputsValues, unorderedEquals([1, 2]));
+    });
+
+    test('fromJson (non-String node type, reference with different key)', () {
+      // Keys that map to the same node value through `nodeValueMapper`
+      // but are spelled differently in the JSON:
+      var g = Graph<int>.fromJson({
+        '1': {
+          '02': {'4': null},
+        },
+        '3': {'2': '2'},
+      }, nodeValueMapper: (s, k) => int.parse(k));
+
+      expect(g.node(1).outputsValues, equals([2]));
+      expect(g.node(3).outputsValues, equals([2]));
+      expect(g.node(2).outputsValues, equals([4]));
     });
 
     test('fromJson (invalid)', () {

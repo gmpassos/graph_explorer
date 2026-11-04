@@ -1,3 +1,14 @@
+## 1.1.1
+
+- `Graph`:
+  - Fix `toTree` / `toTreeFrom`: the `keyCast` argument was silently ignored (it was not
+    forwarded to `GraphWalker.toTreeFrom`).
+  - Fix `Graph.fromJson` for non-`String` node types (e.g. `Graph<int>.fromJson` with a
+    `nodeValueMapper`): JSON nodes were looked up by node value instead of by their `String`
+    key, so only the roots were created. JSON keys are now tracked per parent.
+    A string reference is also accepted when it maps to the same node value.
+- Tests for `keyCast` and for `fromJson` with `int` nodes (merged definitions, references).
+
 ## 1.1.0
 
 - sdk: ^3.13.0
