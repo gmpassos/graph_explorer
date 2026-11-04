@@ -909,9 +909,14 @@ class Node<T> extends NodeIO<T> {
   ///   as small lists won't benefit from a [Set].
   final List<Node<T>> _inputs;
 
-  Node(this.value, {this._graph}) : _inputs = [];
+  /// `true` if created with [Node.root].
+  final bool _alwaysRoot;
 
-  Node.root(this.value, {this._graph}) : _inputs = List.unmodifiable([]) {
+  Node(this.value, {this._graph}) : _inputs = [], _alwaysRoot = false;
+
+  Node.root(this.value, {this._graph})
+    : _inputs = List.unmodifiable([]),
+      _alwaysRoot = true {
     _shortestPathToRoot = UnmodifiableListView([]);
   }
 
@@ -1045,8 +1050,7 @@ class Node<T> extends NodeIO<T> {
   bool get isRoot => _inputs.isEmpty;
 
   /// Returns `true` if this node was created with [Node.root] (can't have inputs).
-  bool get isAlwaysRoot =>
-      _shortestPathToRoot is UnmodifiableListView && _inputs.isEmpty;
+  bool get isAlwaysRoot => _alwaysRoot;
 
   /// Return the inputs of this node.
   @override
@@ -1886,7 +1890,7 @@ extension IterableOfListNodeExtension<T> on Iterable<List<Node<T>>> {
 
     var max = sorted.last.length;
 
-    var idx = sorted.indexWhere((p) => p.length < max);
+    var idx = sorted.lastIndexWhere((p) => p.length < max);
 
     if (idx < 0) {
       return sorted;
