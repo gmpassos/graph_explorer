@@ -7,6 +7,7 @@
 //
 
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:collection/collection.dart';
 
@@ -217,13 +218,14 @@ class GraphScanner<T> {
 
   /// Performs a scan and returns the found node paths.
   ///
-  /// The paths should start at [from] and end at a node that matches [targetMatcher].
+  /// Every path starts at [from] and ends at a node that matches [targetMatcher].
+  /// See [scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsFrom(
     T from,
     NodeMatcher<T> targetMatcher, {
     Graph<T>? graph,
     NodesProvider<T>? outputsProvider,
-    int maxExpansion = 3,
+    int? maxExpansion,
   }) async {
     return scanPathsFromMany(
       [from],
@@ -236,28 +238,51 @@ class GraphScanner<T> {
 
   /// Performs a scan and returns the found node paths.
   ///
-  /// The paths should start one of the nodes at [fromMany] and end at a node that
-  /// matches [targetMatcher].
+  /// Every path starts at one of the nodes in [fromMany] and ends at a node
+  /// that matches [targetMatcher] (a path can pass through other matching
+  /// nodes). Paths are simple (no repeated node).
+  ///
+  /// - If [findAll] is `false`, returns one of the shortest paths
+  ///   (the scan is a BFS that stops at the 1st matching node).
+  /// - If [findAll] is `true`, returns all the paths, grouped by target
+  ///   (in [Graph.targets] order) and sorted by length.
+  /// - [maxExpansion]: an optional cap for [findAll], the maximum number of
+  ///   times a node is expanded while enumerating paths. With a cap only a
+  ///   subset of the paths may be returned. Default: `null` (no cap: all paths).
+  ///   Note that the number of paths can grow exponentially with the graph size.
+  /// - [outputsProvider]: provides the outputs of a node. If [graph] is `null`,
+  ///   a new [Graph] is populated with it.
   Future<GraphScanResult<T>> scanPathsFromMany(
     List<T> fromMany,
     NodeMatcher<T> targetMatcher, {
     Graph<T>? graph,
     NodesProvider<T>? outputsProvider,
-    int maxExpansion = 3,
+    int? maxExpansion,
   }) async {
     var initTime = DateTime.now();
 
+    // The nodes reached by the scan walk:
+    final reached = <Node<T>>{};
+    // The step of the 1st target found (when not [findAll]):
+    GraphNodeStep<T>? targetStep;
+
     GraphWalkingInstruction<bool>? processTarget(GraphNodeStep<T> step) {
       var node = step.node;
+      reached.add(node);
 
       if (targetMatcher.matchesNode(node)) {
         node.markAsTarget();
         if (!findAll) {
+          targetStep = step;
           return GraphWalkingInstruction.stop();
         }
       }
       return null;
     }
+
+    Iterable<Node<T>> outputsOfNode(Node<T> node) => node._outputs;
+    Iterable<Node<T>> Function(Node<T> node) outputsOf = outputsOfNode;
+    List<Node<T>> fromNodes;
 
     if (graph == null) {
       graph = Graph<T>();
@@ -287,12 +312,16 @@ class GraphScanner<T> {
         }
       }
 
+      // A BFS: the 1st target found is one of the closest to [fromMany].
       await graph.populateAsync(
         fromMany,
         outputsProvider: nodeOutputsProvider,
         process: processTarget,
-        maxExpansion: maxExpansion,
+        maxExpansion: 1,
+        bfs: true,
       );
+
+      fromNodes = graph.getNodes(fromMany).toList();
     } else {
       if (graph.isEmpty && outputsProvider == null) {
         return GraphScanResult(
@@ -308,16 +337,29 @@ class GraphScanner<T> {
 
       graph.reset();
 
-      final nodeOutputsProvider = outputsProvider != null
-          ? (GraphNodeStep<T> step, Node<T> node) =>
-                outputsProvider(graph!, node)
-          : (GraphNodeStep<T> step, Node<T> node) => node._outputs;
+      GraphWalkNodeOutputsProviderAsync<T> nodeOutputsProvider;
+      if (outputsProvider != null) {
+        // Paths follow the provided outputs (not necessarily graph edges):
+        final provided = <Node<T>, List<Node<T>>>{};
+        outputsOf = (node) => provided[node] ?? const [];
 
-      await GraphWalker<T>(
-        maxExpansion: maxExpansion,
-        bfs: true,
-      ).walkByNodesAsync<bool>(
-        graph.valuesToNodes(fromMany, createNodes: true),
+        nodeOutputsProvider = (step, node) {
+          var l = outputsProvider(graph!, node);
+          if (l is Future<List<Node<T>>>) {
+            return l.then((l) => provided[node] = l);
+          } else {
+            return provided[node] = l;
+          }
+        };
+      } else {
+        nodeOutputsProvider = (step, node) => node._outputs;
+      }
+
+      fromNodes = graph.valuesToNodes(fromMany, createNodes: true).toList();
+
+      // A BFS: the 1st target found is one of the closest to [fromMany].
+      await GraphWalker<T>(bfs: true).walkByNodesAsync<bool>(
+        fromNodes,
         process: processTarget,
         outputsProvider: nodeOutputsProvider,
       );
@@ -325,12 +367,18 @@ class GraphScanner<T> {
 
     var pathsInitTime = DateTime.now();
 
-    var targets = graph.targets;
-
-    var paths = _resolvePaths(targets, maxExpansion);
-
-    if (!findAll) {
-      paths = paths.shortestPaths();
+    List<List<Node<T>>> paths;
+    if (findAll) {
+      paths = _enumeratePaths<T>(
+        fromNodes,
+        graph.targets,
+        reached,
+        outputsOf,
+        maxExpansion: maxExpansion,
+      );
+    } else {
+      var step = targetStep;
+      paths = step == null ? [] : [step.nodePathToRoot.toList()];
     }
 
     var endTime = DateTime.now();
@@ -347,17 +395,86 @@ class GraphScanner<T> {
       resolvePathsTime: timePaths,
     );
   }
+}
 
-  List<List<Node<T>>> _resolvePaths(List<Node<T>> targets, int maxExpansion) {
-    var pathsItr = findAll
-        ? targets.expand(
-            (e) => e.resolveAllPathsToRoot(maxExpansion: maxExpansion),
-          )
-        : targets.map((e) => e.shortestPathToRoot);
+/// Enumerates all the simple paths starting at one of the [starts] and
+/// ending at one of the [ends], following [nextOf].
+///
+/// - [reached]: the nodes reachable from [starts] (following [nextOf]).
+///   Only nodes in [reached] that lead to an end node are expanded.
+/// - [maxExpansion]: an optional cap of times a node is expanded.
+/// - Returns the paths grouped by end node (in [ends] order), each group
+///   sorted by length (stable: ties keep the enumeration order, a DFS).
+List<List<Node<T>>> _enumeratePaths<T>(
+  Iterable<Node<T>> starts,
+  List<Node<T>> ends,
+  Set<Node<T>> reached,
+  Iterable<Node<T>> Function(Node<T> node) nextOf, {
+  int? maxExpansion,
+}) {
+  if (ends.isEmpty) return [];
 
-    var paths = pathsItr.toList();
-    return paths;
+  // The reverse of [nextOf] over the [reached] nodes:
+  final previousOf = <Node<T>, List<Node<T>>>{};
+  for (var node in reached) {
+    for (var next in nextOf(node)) {
+      (previousOf[next] ??= <Node<T>>[]).add(node);
+    }
   }
+
+  // The nodes that lead to an end node:
+  final leadsToEnd = <Node<T>>{...ends};
+  final queue = ListQueue<Node<T>>.of(ends);
+  while (queue.isNotEmpty) {
+    var node = queue.removeFirst();
+    for (var previous in previousOf[node] ?? const []) {
+      if (leadsToEnd.add(previous)) {
+        queue.add(previous);
+      }
+    }
+  }
+
+  final pathsByEnd = <Node<T>, List<List<Node<T>>>>{
+    for (var e in ends) e: <List<Node<T>>>[],
+  };
+
+  final expansions = <Node<T>, int>{};
+  final path = <Node<T>>[];
+  final onPath = <Node<T>>{};
+  final iterators = <Iterator<Node<T>>>[];
+
+  void enter(Node<T> node) {
+    path.add(node);
+    onPath.add(node);
+
+    pathsByEnd[node]?.add(path.toList(growable: false));
+
+    var count = expansions.increment(node);
+    var expand = maxExpansion == null || count <= maxExpansion;
+    iterators.add(expand ? nextOf(node).iterator : const <Never>[].iterator);
+  }
+
+  // Iterative DFS (avoids deep recursion on long paths):
+  for (var start in starts.toSet()) {
+    if (!leadsToEnd.contains(start)) continue;
+
+    enter(start);
+
+    while (iterators.isNotEmpty) {
+      var it = iterators.last;
+      if (it.moveNext()) {
+        var next = it.current;
+        if (leadsToEnd.contains(next) && !onPath.contains(next)) {
+          enter(next);
+        }
+      } else {
+        iterators.removeLast();
+        onPath.remove(path.removeLast());
+      }
+    }
+  }
+
+  return [for (var e in ends) ...pathsByEnd[e]!.sortedPathsByLength()];
 }
 
 /// Interface for an element that have [input] and [output] nodes.
@@ -533,8 +650,43 @@ class Graph<T> implements NodeIO<T> {
   @override
   Node<T>? addOutput(T nodeValue) => addInput(nodeValue);
 
+  /// Incremented on every structural change (new node or new edge).
+  /// Invalidates the cached [Node.shortestPathToRoot] and [Node.depth].
+  int _version = 0;
+
+  void _changed() => _version++;
+
+  /// `true` if an edge links a [Node] that is not in [_allNodes]
+  /// (e.g. created with the [Node] constructor), so the cached
+  /// [_resolveRootDistances] can't be used.
+  bool _hasForeignNodes = false;
+
+  Map<Node<T>, int>? _rootDistances;
+  int _rootDistancesVersion = -1;
+
+  /// The distance (in edges) from the closest root to each node
+  /// (absent for nodes not reachable from a root).
+  /// A multi-source BFS from the [roots], cached until the graph changes.
+  Map<Node<T>, int> _resolveRootDistances() {
+    var distances = _rootDistances;
+    if (distances != null && _rootDistancesVersion == _version) {
+      return distances;
+    }
+
+    _rootDistances = distances = _computeRootDistances(_allNodes.values);
+    _rootDistancesVersion = _version;
+    return distances;
+  }
+
   /// Returns a [Node] with [value] or creates it.
-  Node<T> node(T value) => _allNodes[value] ??= Node(value, graph: this);
+  Node<T> node(T value) {
+    var node = _allNodes[value];
+    if (node == null) {
+      _allNodes[value] = node = Node(value, graph: this);
+      _changed();
+    }
+    return node;
+  }
 
   /// Returns a [Node] with [value] or `null` if not present.
   Node<T>? getNode(T? value) {
@@ -572,7 +724,11 @@ class Graph<T> implements NodeIO<T> {
 
   /// Returns a [Node] with [value] or creates it as always root.
   Node<T> root(T value) {
-    var node = _allNodes[value] ??= Node.root(value, graph: this);
+    var node = _allNodes[value];
+    if (node == null) {
+      _allNodes[value] = node = Node.root(value, graph: this);
+      _changed();
+    }
     return node;
   }
 
@@ -601,6 +757,8 @@ class Graph<T> implements NodeIO<T> {
     var nodes = _allNodes.values.toList(growable: false);
 
     _allNodes.clear();
+    _changed();
+    _rootDistances = null;
 
     for (var e in nodes) {
       e.disposeGraph();
@@ -645,6 +803,9 @@ class Graph<T> implements NodeIO<T> {
       toTree<String>(sortByInputDependency: sortByInputDependency);
 
   /// Scans and returns the paths from [root] to [target].
+  /// Every path starts at [root] (that doesn't need to be a [roots] node).
+  /// - [findAll]: if `true` returns all the paths, otherwise one of the shortest.
+  /// - See [GraphScanner.scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsFrom(
     T root,
     T target, {
@@ -655,6 +816,9 @@ class Graph<T> implements NodeIO<T> {
   }
 
   /// Scans and returns the paths from [roots] to [targets].
+  /// Every path starts at one of the [roots] (any node, not only the graph [roots]).
+  /// - [findAll]: default `true` if there's more than one root or target.
+  /// - See [GraphScanner.scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsFromMany(
     List<T> roots,
     List<T> targets, {
@@ -669,7 +833,9 @@ class Graph<T> implements NodeIO<T> {
     );
   }
 
-  /// Scans and returns the paths from [root] to [Node]s matching [targetMatcher].
+  /// Scans and returns the paths from [roots] to [Node]s matching [targetMatcher].
+  /// Every path starts at one of the [roots] (any node, not only the graph [roots]).
+  /// - See [GraphScanner.scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsMatching(
     List<T> roots,
     NodeMatcher<T> targetMatcher, {
@@ -680,6 +846,8 @@ class Graph<T> implements NodeIO<T> {
   }
 
   /// Returns the shortest paths from [root] to [target].
+  /// - [findAll]: if `true` returns all the shortest paths
+  ///   (enumerating all the paths first), otherwise one of them (a BFS).
   Future<List<List<Node<T>>>> shortestPathsFrom(
     T root,
     T target, {
@@ -933,9 +1101,7 @@ class Node<T> extends NodeIO<T> {
 
   Node.root(this.value, {this._graph})
     : _inputs = List.unmodifiable([]),
-      _alwaysRoot = true {
-    _shortestPathToRoot = UnmodifiableListView([]);
-  }
+      _alwaysRoot = true;
 
   Graph<T>? get graph => _graph;
 
@@ -990,7 +1156,7 @@ class Node<T> extends NodeIO<T> {
 
     if (!containsOutputNode(node)) {
       _outputs.add(node);
-      _shortestPathToRoot = null;
+      _edgeAdded(node);
 
       if (addInput) {
         node._addInputNode(this, addOutput: false);
@@ -1097,7 +1263,7 @@ class Node<T> extends NodeIO<T> {
 
     if (!containsInputNode(node)) {
       _inputs.add(node);
-      _shortestPathToRoot = null;
+      _edgeAdded(node);
 
       if (addOutput) {
         node._addOutputNode(this, addInput: false);
@@ -1368,259 +1534,132 @@ class Node<T> extends NodeIO<T> {
   bool isInputInShortestPathToRoot(Node target) =>
       shortestPathToRoot.contains(target);
 
-  /// The node depth from root.
-  /// See [shortestPathToRoot].
-  int get depth => shortestPathToRoot.length;
+  /// The node depth from root: the length of [shortestPathToRoot]
+  /// (`1` for a root node).
+  /// - Throws a [StateError] if no root reaches this node (e.g. a pure cycle).
+  int get depth {
+    var path = _validShortestPathToRoot;
+    if (path != null) return path.length;
+
+    var distances = _graphRootDistances();
+    if (distances == null) {
+      // Not cached by a graph: compute (and cache) the path.
+      return shortestPathToRoot.length;
+    }
+
+    var distance = distances[this];
+    if (distance == null) {
+      throw StateError("No path to root from: $value");
+    }
+    return distance + 1;
+  }
 
   UnmodifiableListView<Node<T>>? _shortestPathToRoot;
+  int _shortestPathToRootVersion = -1;
 
-  /// Returns the shortest path to root (unmodifiable [List]).
-  List<Node<T>> get shortestPathToRoot =>
-      _shortestPathToRoot ??= UnmodifiableListView(resolveShortestPathToRoot());
+  int get _graphVersion => _graph?._version ?? 0;
 
-  /// Resolves the shortest path to root from this node.
-  /// Since [inputs] is populated in BFS, the 1st input is one of the closest to the root.
+  UnmodifiableListView<Node<T>>? get _validShortestPathToRoot =>
+      _shortestPathToRootVersion == _graphVersion ? _shortestPathToRoot : null;
+
+  /// Invalidates the cached paths after adding an edge with [other].
+  /// (Both ends are in the same [graph]: [other] is resolved by [_resolveNode].)
+  void _edgeAdded(Node<T> other) {
+    _shortestPathToRoot = null;
+    other._shortestPathToRoot = null;
+
+    final graph = _graph;
+    if (graph != null) {
+      graph._changed();
+      if (!identical(graph._allNodes[value], this) ||
+          !identical(graph._allNodes[other.value], other)) {
+        graph._hasForeignNodes = true;
+      }
+    }
+  }
+
+  /// Returns the shortest path from a root to this node (unmodifiable [List]).
+  /// - A root node returns `[this]`.
+  /// - Cached until the [graph] changes.
+  /// - See [resolveShortestPathToRoot].
+  List<Node<T>> get shortestPathToRoot {
+    var path = _validShortestPathToRoot;
+    if (path == null) {
+      _shortestPathToRoot = path = UnmodifiableListView(
+        resolveShortestPathToRoot(),
+      );
+      _shortestPathToRootVersion = _graphVersion;
+    }
+    return path;
+  }
+
+  /// The distances from the closest root of all the [graph] nodes
+  /// (computed once until the graph changes), or `null` if this node is not
+  /// in the [graph] (or the graph has foreign nodes).
+  Map<Node<T>, int>? _graphRootDistances() {
+    final graph = _graph;
+    if (graph != null &&
+        !graph._hasForeignNodes &&
+        identical(graph._allNodes[value], this)) {
+      return graph._resolveRootDistances();
+    }
+    return null;
+  }
+
+  /// The distance from the closest root to this node and its ancestors.
+  Map<Node<T>, int> _rootDistances() {
+    var distances = _graphRootDistances();
+    if (distances != null) return distances;
+
+    // Not in a [Graph]: only the ancestors matter.
+    final ancestors = <Node<T>>{this, ...inputsInDepth()};
+    return _computeRootDistances(ancestors, within: ancestors);
+  }
+
+  /// Resolves the shortest path from a root to this node
+  /// (a BFS over the [inputs], see [shortestPathToRoot]).
+  ///
+  /// - Ties are resolved by the [inputs] order (the 1st input that is in
+  ///   a shortest path).
+  /// - Throws a [StateError] if no root reaches this node (e.g. a pure cycle).
   List<Node<T>> resolveShortestPathToRoot() {
-    // A buffer on paths being computed until the root:
-    final computingPathsBuffer = [
-      [this],
-    ];
+    final distances = _rootDistances();
 
-    final computingPathsIdxRet = <int>[0];
-    var expandCursor = 0;
-
-    var graphWalker = GraphWalker<T>();
-
-    var shortestPath = graphWalker.walkByNodes<List<Node<T>>>(
-      [this],
-      outputsProvider: (step, node) {
-        var inputs = node._inputs;
-        return inputs.isEmpty ? [] : [inputs.first];
-      },
-      process: (step) {
-        var node = step.node;
-
-        var computingPaths = _getComputingPaths<T>(
-          computingPathsBuffer,
-          node,
-          expandCursor,
-          computingPathsIdxRet,
-        );
-
-        if (computingPaths == null) return null;
-
-        var computingPathsIdx = computingPathsIdxRet[0];
-
-        if (node.isRoot) {
-          // [computingPaths] of [node] completed.
-          // Return one of the shortest path (1st):
-          return GraphWalkingInstruction.result(computingPaths.first);
-        }
-
-        // In a BFS the 1st input will be one of the closest to root,
-        // don't need to expand with all the inputs:
-        var closerToRoot = node._inputs.first;
-
-        var inputs = [closerToRoot];
-
-        expandCursor = _expandComputingPaths<T>(
-          computingPathsBuffer,
-          computingPaths,
-          computingPathsIdx,
-          inputs,
-          expandCursor,
-        );
-
-        return null;
-      },
-    );
-
-    if (shortestPath == null) {
+    final distance = distances[this];
+    if (distance == null) {
       throw StateError("No path to root from: $value");
     }
 
-    return shortestPath;
+    final path = List<Node<T>>.filled(distance + 1, this);
+
+    var node = this;
+    for (var d = distance - 1; d >= 0; d--) {
+      node = node._inputs.firstWhere((e) => distances[e] == d);
+      path[d] = node;
+    }
+
+    return path;
   }
 
-  /// Resolves all the paths to the root from this node.
+  /// Resolves all the simple paths from a root to this node.
   ///
-  /// The algorithm tries to remove meaningless
-  /// nodes, such as branches that only exist due to indirect self-references.
-  List<List<Node<T>>> resolveAllPathsToRoot({int maxExpansion = 3}) {
-    var rootPaths = <List<Node<T>>>[];
+  /// - [maxExpansion]: an optional cap of times a node is expanded while
+  ///   enumerating the paths. With a cap only a subset of the paths may be
+  ///   returned. Default: `null` (no cap: all paths).
+  /// - Returns the paths sorted by length.
+  List<List<Node<T>>> resolveAllPathsToRoot({int? maxExpansion}) {
+    final ancestors = <Node<T>>{this, ...inputsInDepth()};
+    final roots = ancestors.where((e) => e.isRoot).toList();
 
-    // A buffer on paths being computed until the root:
-    final computingPathsBuffer = [
+    var paths = _enumeratePaths<T>(
       [this],
-    ];
-
-    final computingPathsIdxRet = <int>[0];
-    var expandCursor = 0;
-
-    var graphWalker = GraphWalker<T>(maxExpansion: maxExpansion, bfs: true);
-
-    graphWalker.walkByNodes<List<Node<T>>>(
-      [this],
-      outputsProvider: (step, node) => node._inputs,
-      process: (step) {
-        var node = step.node;
-
-        var computingPaths = _getComputingPaths<T>(
-          computingPathsBuffer,
-          node,
-          expandCursor,
-          computingPathsIdxRet,
-        );
-
-        if (computingPaths == null) return null;
-
-        var computingPathsIdx = computingPathsIdxRet[0];
-        var computingPathsEndIdx = computingPathsIdx + computingPaths.length;
-
-        if (node.isRoot) {
-          // [computingPaths] of [node] completed,
-          // remove it from [computingPathsBuffer].
-          computingPathsBuffer.removeRange(
-            computingPathsIdx,
-            computingPathsEndIdx,
-          );
-
-          rootPaths.addAll(computingPaths);
-          expandCursor = computingPathsIdx;
-
-          // Allow independent branches to be computed:
-          // Reset counter to 0:
-          return GraphWalkingInstruction.setExpansionCounter(0);
-        }
-
-        final processed = step.processed;
-
-        final newNode = processed[node] == 1;
-
-        // Skip target nodes (leafs with `target == true`)
-        // already processed (avoids self-reference):
-        if (node.isTarget && !newNode) {
-          return null;
-        }
-
-        var inputs = node._inputs;
-
-        if (!newNode) {
-          var unprocessed = inputs
-              .where((e) => !processed.containsKey(e))
-              .toList();
-
-          // Not all inputs are unprocessed:
-          if (unprocessed.length < inputs.length) {
-            // Allow inputs that are not targets (leaves with `matches`)
-            // or that are [unprocessed].
-            var allowedIts = inputs.where(
-              (e) => !e.isTarget || unprocessed.contains(e),
-            );
-
-            // Ensure that inputs processed more than 3 times are skipped,
-            // to avoid infinite loops or meaningless branches already seen:
-            allowedIts = allowedIts.where(
-              (e) => (processed[e] ?? 0) <= maxExpansion,
-            );
-
-            var allowed = allowedIts.toList();
-
-            // Only expand with allowed inputs:
-            inputs = allowed;
-          }
-        }
-
-        expandCursor = _expandComputingPaths(
-          computingPathsBuffer,
-          computingPaths,
-          computingPathsIdx,
-          inputs,
-          expandCursor,
-        );
-
-        return null;
-      },
+      roots,
+      ancestors,
+      (node) => node._inputs,
+      maxExpansion: maxExpansion,
     );
 
-    return rootPaths;
-  }
-
-  /// Returns the computing paths of [node].
-  ///
-  /// - [computingPathsBuffer] is populated in the same order that [node] is added
-  ///   to the queue to be processed, so the computing paths of [node] are in
-  ///   an ordered way.
-  /// - [expandCursor] points to the last `"expanded path" + 1`, indicating where
-  ///   the [node] computing paths should be. See [_expandComputingPaths].
-  /// - The [node[ computing paths are the ones where the 1st element is [node].
-  // Change `computingPathIdx` to records when moving to Dart 3:
-  static List<List<Node<T>>>? _getComputingPaths<T>(
-    List<List<Node<T>>> computingPathsBuffer,
-    Node node,
-    int expandCursor,
-    List<int> computingPathsIdx,
-  ) {
-    var idx1 = computingPathsBuffer.indexWhere(
-      (e) => e.first == node,
-      expandCursor,
-    );
-    if (idx1 < 0) {
-      idx1 = computingPathsBuffer.indexWhere((e) => e.first == node, 0);
-      if (idx1 < 0) {
-        return null;
-      }
-    }
-
-    var idx2 = computingPathsBuffer.indexWhere((e) => e.first != node, idx1);
-    if (idx2 < 0) {
-      idx2 = computingPathsBuffer.length;
-    }
-
-    var inputPaths = computingPathsBuffer.getRange(idx1, idx2).toList();
-    computingPathsIdx[0] = idx1;
-
-    return inputPaths;
-  }
-
-  /// Expands the computing paths of [node],
-  /// [computingPathsBuffer]
-  static int _expandComputingPaths<T>(
-    List<List<Node<T>>> computingPathsBuffer,
-    List<List<Node<T>>> computingPaths,
-    int computingPathsIdx,
-    List<Node<T>> nodeInputs,
-    int expandCursor,
-  ) {
-    final expandedPaths = computingPaths
-        .expand((c) {
-          // Avoid to expand paths with an input that is an indirect self-reference:
-          var nonRecursiveInputs = nodeInputs.where((p) => !c.contains(p));
-          return nonRecursiveInputs.map((p) => [p, ...c]);
-        })
-        .toList(growable: false);
-
-    final computingPathsEndIdx = computingPathsIdx + computingPaths.length;
-
-    // Replace the [computingPathsBuffer] region that contains [computingPaths]
-    // with the [expandedPaths].
-    if (computingPaths.length == expandedPaths.length) {
-      computingPathsBuffer.setRange(
-        computingPathsIdx,
-        computingPathsEndIdx,
-        expandedPaths,
-      );
-      expandCursor = computingPathsEndIdx;
-    } else {
-      computingPathsBuffer.replaceRange(
-        computingPathsIdx,
-        computingPathsEndIdx,
-        expandedPaths,
-      );
-      expandCursor = computingPathsIdx + expandedPaths.length;
-    }
-
-    return expandCursor;
+    return paths.map((p) => p.reversed.toList()).toList().sortedPathsByLength();
   }
 
   /// Resets this node for a path scan.
@@ -1653,8 +1692,45 @@ class Node<T> extends NodeIO<T> {
 
   @override
   String toString() {
-    return '(${_shortestPathToRoot?.length ?? '?'}) ${_inputs.length} -> $value -> ${_outputs.length}';
+    return '(${_validShortestPathToRoot?.length ?? '?'}) ${_inputs.length} -> $value -> ${_outputs.length}';
   }
+}
+
+/// The distance (in edges) from the closest root to each node reachable from
+/// a root in [nodes] (a multi-source BFS over the outputs).
+/// - [within]: if provided, only these nodes are walked.
+Map<Node<T>, int> _computeRootDistances<T>(
+  Iterable<Node<T>> nodes, {
+  Set<Node<T>>? within,
+}) {
+  final distances = <Node<T>, int>{};
+  final queue = ListQueue<Node<T>>();
+
+  for (var node in nodes) {
+    if (node.isRoot && !distances.containsKey(node)) {
+      distances[node] = 0;
+      queue.add(node);
+    }
+  }
+
+  while (queue.isNotEmpty) {
+    var node = queue.removeFirst();
+    var distance = distances[node]! + 1;
+
+    for (var output in node._outputs) {
+      if (distances.containsKey(output)) continue;
+      if (within != null && !within.contains(output)) continue;
+
+      distances[output] = distance;
+      queue.add(output);
+    }
+  }
+
+  return distances;
+}
+
+extension _MapOfIntExtension<K> on Map<K, int> {
+  int increment(K key) => update(key, (count) => count + 1, ifAbsent: () => 1);
 }
 
 extension IterableNodeExtension<T> on Iterable<Node<T>> {
@@ -1742,26 +1818,41 @@ extension IterableNodeExtension<T> on Iterable<Node<T>> {
     return intersection;
   }
 
-  List<Node<T>> sortedByOutputsDepth({bool bfs = false}) {
-    var nodesOutputs = outputsInDepth(bfs: bfs);
+  /// Returns the nodes sorted by the number of [Node.outputsInDepth]
+  /// (stable: ties keep the original order).
+  List<Node<T>> sortedByOutputsDepth({bool bfs = false}) =>
+      _sortedByLength(outputsInDepth(bfs: bfs));
 
-    var entries = nodesOutputs.entries.toList();
+  /// Returns the nodes sorted by the number of [Node.inputsInDepth]
+  /// (stable: ties keep the original order).
+  List<Node<T>> sortedByInputDepth({bool bfs = false}) =>
+      _sortedByLength(inputsInDepth(bfs: bfs));
 
-    entries.sort((a, b) => a.value.length.compareTo(b.value.length));
+  /// Same as [sortedByOutputsDepth], but in descending order
+  /// (also stable, unlike reversing an ascending sort).
+  List<Node<T>> _sortedByOutputsDepthDescending() =>
+      _sortedByLength(outputsInDepth(), descending: true);
 
-    var nodes = entries.keys.toList();
-    return nodes;
-  }
+  static List<Node<T>> _sortedByLength<T>(
+    Map<Node<T>, List<Node<T>>> nodesLists, {
+    bool descending = false,
+  }) {
+    var entries = nodesLists.entries.toList();
 
-  List<Node<T>> sortedByInputDepth({bool bfs = false}) {
-    var nodesInputs = inputsInDepth(bfs: bfs);
+    // `mergeSort` is stable (`List.sort` is not):
+    if (descending) {
+      mergeSort(
+        entries,
+        compare: (a, b) => b.value.length.compareTo(a.value.length),
+      );
+    } else {
+      mergeSort(
+        entries,
+        compare: (a, b) => a.value.length.compareTo(b.value.length),
+      );
+    }
 
-    var entries = nodesInputs.entries.toList();
-
-    entries.sort((a, b) => a.value.length.compareTo(b.value.length));
-
-    var nodes = entries.keys.toList();
-    return nodes;
+    return entries.keys.toList();
   }
 
   List<Node<T>> sortedByOutputDependency({int? maxDepth, bool bfs = false}) {
@@ -1800,7 +1891,7 @@ extension IterableNodeExtension<T> on Iterable<Node<T>> {
 
     nodesOutputsEntries.removeWhere((e) => isolated.contains(e.key));
 
-    isolated = isolated.sortedByOutputsDepth().toReversedList(growable: false);
+    isolated = isolated._sortedByOutputsDepthDescending();
 
     var sideRoots = nodesOutputsEntries
         .map((e) => MapEntry(e.key, e.key.sideRoots()))
@@ -1813,7 +1904,7 @@ extension IterableNodeExtension<T> on Iterable<Node<T>> {
 
     nodesOutputsEntries.removeWhere((e) => withoutSideRoots.contains(e.key));
 
-    var rest = nodesOutputsEntries.keys.sortedByOutputsDepth().toReversedList();
+    var rest = nodesOutputsEntries.keys._sortedByOutputsDepthDescending();
 
     var nodes = [...alone, ...isolated, ...withoutSideRoots, ...rest].toList();
     return nodes;
@@ -1858,9 +1949,9 @@ extension IterableNodeExtension<T> on Iterable<Node<T>> {
 
     nodesInputsEntries.removeWhere((e) => isolated.contains(e.key));
 
-    isolated = isolated.sortedByOutputsDepth().toReversedList(growable: false);
+    isolated = isolated._sortedByOutputsDepthDescending();
 
-    var rest = nodesInputsEntries.keys.sortedByOutputsDepth().toReversedList();
+    var rest = nodesInputsEntries.keys._sortedByOutputsDepthDescending();
 
     var nodes = [...directRoots, ...isolated, ...rest].toList();
     return nodes;
@@ -1868,9 +1959,13 @@ extension IterableNodeExtension<T> on Iterable<Node<T>> {
 }
 
 extension IterableOfListNodeExtension<T> on Iterable<List<Node<T>>> {
-  /// Returns a [List] with the paths sorted by length.
-  List<List<Node<T>>> sortedPathsByLength() =>
-      sorted((a, b) => a.length.compareTo(b.length)).toList();
+  /// Returns a [List] with the paths sorted by length
+  /// (stable: paths with the same length keep their order).
+  List<List<Node<T>>> sortedPathsByLength() {
+    var paths = toList();
+    mergeSort(paths, compare: (a, b) => a.length.compareTo(b.length));
+    return paths;
+  }
 
   /// Returns the shortest paths.
   List<List<Node<T>>> shortestPaths() {
@@ -1937,11 +2032,6 @@ extension IterableOfListNodeExtension<T> on Iterable<List<Node<T>>> {
       e.disposeGraph();
     }
   }
-}
-
-extension _ListTypeExtension<T> on List<T> {
-  List<T> toReversedList({bool growable = true}) =>
-      reversed.toList(growable: growable);
 }
 
 extension MapNodeExtension<T, V> on Map<Node<T>, V> {

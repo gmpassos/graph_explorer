@@ -351,6 +351,7 @@ class GraphWalker<T> {
 
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
+    final expandedDepths = _ExpandedDepths<T>.forMaxDepth(maxDepth);
 
     for (var rootValue in from) {
       var rootStepValue = GraphValueStep.root(this, rootValue);
@@ -401,16 +402,20 @@ class GraphWalker<T> {
         if (stopMatcher.matchesNode(node)) {
           return _resolveWalkProcessReturn<T, R>(node, true);
         }
+      } else if (!expandedDepths.isShallower(step)) {
+        continue;
+      }
 
-        var outputs = outputsProvider(step, nodeValue);
-        if (outputs != null) {
-          var outputsNodes = outputs.map((v) {
-            var nodeStepValue = GraphValueStep.subNode(step, v);
-            return nodeProvider(nodeStepValue, v)!;
-          });
+      expandedDepths.expanded(step);
 
-          queue.addAllToScanQueue(outputsNodes.toGraphNodeStep(step), bfs);
-        }
+      var outputs = outputsProvider(step, nodeValue);
+      if (outputs != null) {
+        var outputsNodes = outputs.map((v) {
+          var nodeStepValue = GraphValueStep.subNode(step, v);
+          return nodeProvider(nodeStepValue, v)!;
+        });
+
+        queue.addAllToScanQueue(outputsNodes.toGraphNodeStep(step), bfs);
       }
     }
 
@@ -429,6 +434,7 @@ class GraphWalker<T> {
 
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
+    final expandedDepths = _ExpandedDepths<T>.forMaxDepth(maxDepth);
 
     for (var rootValue in from) {
       var rootStepValue = GraphValueStep.root(this, rootValue);
@@ -479,19 +485,23 @@ class GraphWalker<T> {
         if (stopMatcher.matchesNode(node)) {
           return _resolveWalkProcessReturn<T, R>(node, true);
         }
+      } else if (!expandedDepths.isShallower(step)) {
+        continue;
+      }
 
-        var outputs = await outputsProvider(step, nodeValue);
-        if (outputs != null) {
-          var outputsNodes = outputs.map((v) {
-            var nodeStepValue = GraphValueStep.subNode(step, v);
-            return nodeProvider(nodeStepValue, v);
-          });
+      expandedDepths.expanded(step);
 
-          queue.addAllToScanQueue(
-            await outputsNodes.toGraphNodeStepAsync(step),
-            bfs,
-          );
-        }
+      var outputs = await outputsProvider(step, nodeValue);
+      if (outputs != null) {
+        var outputsNodes = outputs.map((v) {
+          var nodeStepValue = GraphValueStep.subNode(step, v);
+          return nodeProvider(nodeStepValue, v);
+        });
+
+        queue.addAllToScanQueue(
+          await outputsNodes.toGraphNodeStepAsync(step),
+          bfs,
+        );
       }
     }
 
@@ -513,6 +523,7 @@ class GraphWalker<T> {
 
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
+    final expandedDepths = _ExpandedDepths<T>.forMaxDepth(maxDepth);
 
     if (sortByInputDependency) {
       from = from.sortedByInputDependency();
@@ -567,28 +578,32 @@ class GraphWalker<T> {
         if (stopMatcher.matchesNode(node)) {
           return _resolveWalkProcessReturn<T, R>(node, true);
         }
-
-        List<Node<T>>? sideBranches;
-        if (expandSideBranches && processSideBranches == null) {
-          sideBranches = _computeSideBranch(node, processed);
-          if (sortByInputDependency) {
-            sideBranches = sideBranches.sortedByInputDependency();
-          }
-        }
-
-        var outputs = outputsProvider(step, node);
-        if (sortByInputDependency) {
-          outputs = outputs?.sortedByInputDependency();
-        }
-
-        var nextStepsSideBranches = sideBranches?.toGraphNodeStep(
-          step,
-          sideBranch: true,
-        );
-        var nextStepsOutputs = outputs?.toGraphNodeStep(step);
-
-        queue.addAllToScanQueue2(nextStepsSideBranches, nextStepsOutputs, bfs);
+      } else if (!expandedDepths.isShallower(step)) {
+        continue;
       }
+
+      expandedDepths.expanded(step);
+
+      List<Node<T>>? sideBranches;
+      if (expandSideBranches && processSideBranches == null) {
+        sideBranches = _computeSideBranch(node, processed);
+        if (sortByInputDependency) {
+          sideBranches = sideBranches.sortedByInputDependency();
+        }
+      }
+
+      var outputs = outputsProvider(step, node);
+      if (sortByInputDependency) {
+        outputs = outputs?.sortedByInputDependency();
+      }
+
+      var nextStepsSideBranches = sideBranches?.toGraphNodeStep(
+        step,
+        sideBranch: true,
+      );
+      var nextStepsOutputs = outputs?.toGraphNodeStep(step);
+
+      queue.addAllToScanQueue2(nextStepsSideBranches, nextStepsOutputs, bfs);
     }
 
     return _resolveWalkProcessReturn<T, R>(null, false);
@@ -607,6 +622,7 @@ class GraphWalker<T> {
 
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
+    final expandedDepths = _ExpandedDepths<T>.forMaxDepth(maxDepth);
 
     if (sortByInputDependency) {
       from = from.sortedByInputDependency();
@@ -661,28 +677,32 @@ class GraphWalker<T> {
         if (stopMatcher.matchesNode(node)) {
           return _resolveWalkProcessReturn<T, R>(node, true);
         }
-
-        List<Node<T>>? sideBranches;
-        if (expandSideBranches && processSideBranches == null) {
-          sideBranches = _computeSideBranch(node, processed);
-          if (sortByInputDependency) {
-            sideBranches = sideBranches.sortedByInputDependency();
-          }
-        }
-
-        var outputs = await outputsProvider(step, node);
-        if (sortByInputDependency) {
-          outputs = outputs?.sortedByInputDependency();
-        }
-
-        var nextStepsSideBranches = sideBranches?.toGraphNodeStep(
-          step,
-          sideBranch: true,
-        );
-        var nextStepsOutputs = outputs?.toGraphNodeStep(step);
-
-        queue.addAllToScanQueue2(nextStepsSideBranches, nextStepsOutputs, bfs);
+      } else if (!expandedDepths.isShallower(step)) {
+        continue;
       }
+
+      expandedDepths.expanded(step);
+
+      List<Node<T>>? sideBranches;
+      if (expandSideBranches && processSideBranches == null) {
+        sideBranches = _computeSideBranch(node, processed);
+        if (sortByInputDependency) {
+          sideBranches = sideBranches.sortedByInputDependency();
+        }
+      }
+
+      var outputs = await outputsProvider(step, node);
+      if (sortByInputDependency) {
+        outputs = outputs?.sortedByInputDependency();
+      }
+
+      var nextStepsSideBranches = sideBranches?.toGraphNodeStep(
+        step,
+        sideBranch: true,
+      );
+      var nextStepsOutputs = outputs?.toGraphNodeStep(step);
+
+      queue.addAllToScanQueue2(nextStepsSideBranches, nextStepsOutputs, bfs);
     }
 
     return _resolveWalkProcessReturn<T, R>(null, false);
@@ -719,6 +739,7 @@ class GraphWalker<T> {
 
     final processed = _processedNodes;
     final queue = ListQueue<GraphNodeStep<T>>();
+    final expandedDepths = _ExpandedDepths<T>.forMaxDepth(maxDepth);
 
     var rootNodes = roots.map((e) {
       var rootStep = GraphValueStep.root(this, e);
@@ -750,28 +771,32 @@ class GraphWalker<T> {
         if (stopMatcher.matchesNode(node)) {
           break;
         }
-
-        List<Node<T>>? sideBranches;
-        if (expandSideBranches) {
-          sideBranches = _computeSideBranch(node, processed);
-          if (sortByInputDependency) {
-            sideBranches = sideBranches.sortedByInputDependency();
-          }
-        }
-
-        var outputs = outputsProvider(step, node);
-        if (sortByInputDependency) {
-          outputs = outputs?.sortedByInputDependency();
-        }
-
-        var nextStepsSideBranch = sideBranches?.toGraphNodeStep(
-          step,
-          sideBranch: true,
-        );
-        var nextStepsOutputs = outputs?.toGraphNodeStep(step);
-
-        queue.addAllToScanQueue2(nextStepsSideBranch, nextStepsOutputs, bfs);
+      } else if (!expandedDepths.isShallower(step)) {
+        continue;
       }
+
+      expandedDepths.expanded(step);
+
+      List<Node<T>>? sideBranches;
+      if (expandSideBranches) {
+        sideBranches = _computeSideBranch(node, processed);
+        if (sortByInputDependency) {
+          sideBranches = sideBranches.sortedByInputDependency();
+        }
+      }
+
+      var outputs = outputsProvider(step, node);
+      if (sortByInputDependency) {
+        outputs = outputs?.sortedByInputDependency();
+      }
+
+      var nextStepsSideBranch = sideBranches?.toGraphNodeStep(
+        step,
+        sideBranch: true,
+      );
+      var nextStepsOutputs = outputs?.toGraphNodeStep(step);
+
+      queue.addAllToScanQueue2(nextStepsSideBranch, nextStepsOutputs, bfs);
     }
 
     return walkOrder.toList();
@@ -918,6 +943,45 @@ class GraphWalker<T> {
   @override
   String toString() {
     return 'GraphWalker{bfs: $bfs, maxExpansion: $maxExpansion, processRoots: $processRoots, sortByInputDependency: $sortByInputDependency, stopMatcher: $stopMatcher, processedNodes: ${_processedNodes.length}, maxProcessedExpansion: $maxProcessedExpansion}';
+  }
+}
+
+/// Tracks the shallowest depth at which each node was expanded, for an exact
+/// `maxDepth` limit in a DFS: a DFS can reach a node first at a deeper level
+/// (through a longer path), where its outputs beyond `maxDepth` are cut.
+/// When that node is reached again at a shallower depth it's re-expanded
+/// (without being processed again), so every node within `maxDepth` is walked.
+///
+/// - Inactive without a `maxDepth` limit, and never triggered in a BFS
+///   (a BFS reaches every node first at its shallowest depth).
+class _ExpandedDepths<T> {
+  final Map<Node<T>, int>? _depths;
+
+  _ExpandedDepths.forMaxDepth(int maxDepth)
+    : _depths = maxDepth < GraphWalker.defaultMaxDepth
+          ? <Node<T>, int>{}
+          : null;
+
+  /// Returns `true` if [step] reaches an already expanded node
+  /// at a shallower depth.
+  bool isShallower(GraphNodeStep<T> step) {
+    final depths = _depths;
+    if (depths == null) return false;
+
+    var depth = depths[step.node];
+    return depth != null && step.depth < depth;
+  }
+
+  /// Marks that the node of [step] was expanded at its depth.
+  void expanded(GraphNodeStep<T> step) {
+    final depths = _depths;
+    if (depths == null) return;
+
+    var node = step.node;
+    var depth = depths[node];
+    if (depth == null || step.depth < depth) {
+      depths[node] = step.depth;
+    }
   }
 }
 
