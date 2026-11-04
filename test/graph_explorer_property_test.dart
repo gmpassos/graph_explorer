@@ -292,7 +292,54 @@ void main() {
                   equals(shortestKeys),
                   reason: reason,
                 );
+                // Only the shortest are enumerated, in the same order:
+                expect(
+                  (await g.shortestPathsFrom(
+                    from,
+                    t,
+                    findAll: true,
+                  )).toListOfValuePaths(),
+                  equals(all.paths.shortestPaths().toListOfValuePaths()),
+                  reason: reason,
+                );
               }
+
+              // Many targets (and many starts):
+              var targets = [
+                for (var t = 0; t < n; t++)
+                  if (t != from) t,
+              ];
+              var starts = {from, (from + 1) % n}.toList();
+              var allMany = await g.scanPathsFromMany(
+                starts,
+                targets,
+                findAll: true,
+              );
+              var expectedMany = [
+                for (var s in starts)
+                  for (var t in targets) ..._simplePaths(adj, s, t),
+              ];
+              expect(
+                _pathsKeys(allMany.paths.toListOfValuePaths()),
+                equals(_pathsKeys(expectedMany)),
+                reason: 'seed: $seed ; from: $starts ; adj: $adj',
+              );
+              expect(
+                (await g.shortestPathsFromMany(
+                  starts,
+                  targets,
+                  findAll: true,
+                )).toListOfValuePaths(),
+                equals(allMany.paths.shortestPaths().toListOfValuePaths()),
+                reason: 'seed: $seed ; from: $starts ; adj: $adj',
+              );
+              expect(
+                (await g.shortestPathsMatching(
+                  starts,
+                  NodeMatcher.eq(targets),
+                )).toListOfValuePaths(),
+                equals(allMany.paths.shortestPaths().toListOfValuePaths()),
+              );
             }
           });
         },

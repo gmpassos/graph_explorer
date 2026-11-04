@@ -258,6 +258,24 @@ class GraphScanner<T> {
     Graph<T>? graph,
     NodesProvider<T>? outputsProvider,
     int? maxExpansion,
+  }) => _scanPathsFromMany(
+    fromMany,
+    targetMatcher,
+    graph: graph,
+    outputsProvider: outputsProvider,
+    maxExpansion: maxExpansion,
+  );
+
+  /// - [shortestOnly]: with [findAll], enumerates only the shortest paths
+  ///   (the same as `shortestPaths()` of all the paths, without enumerating
+  ///   the longer ones).
+  Future<GraphScanResult<T>> _scanPathsFromMany(
+    List<T> fromMany,
+    NodeMatcher<T> targetMatcher, {
+    Graph<T>? graph,
+    NodesProvider<T>? outputsProvider,
+    int? maxExpansion,
+    bool shortestOnly = false,
   }) async {
     var initTime = DateTime.now();
 
@@ -375,6 +393,7 @@ class GraphScanner<T> {
         reached,
         outputsOf,
         maxExpansion: maxExpansion,
+        shortestOnly: shortestOnly,
       );
     } else {
       var step = targetStep;
@@ -403,6 +422,7 @@ class GraphScanner<T> {
 /// - [reached]: the nodes reachable from [starts] (following [nextOf]).
 ///   Only nodes in [reached] that lead to an end node are expanded.
 /// - [maxExpansion]: an optional cap of times a node is expanded.
+/// - [shortestOnly]: only the shortest paths (of all the [ends]).
 /// - Returns the paths grouped by end node (in [ends] order), each group
 ///   sorted by length (stable: ties keep the enumeration order, a DFS).
 List<List<Node<T>>> _enumeratePaths<T>(
@@ -411,8 +431,39 @@ List<List<Node<T>>> _enumeratePaths<T>(
   Set<Node<T>> reached,
   Iterable<Node<T>> Function(Node<T> node) nextOf, {
   int? maxExpansion,
+  bool shortestOnly = false,
 }) {
   if (ends.isEmpty) return [];
+
+  if (shortestOnly) {
+    // The distance from the [starts] (a BFS). Every node in a shortest path
+    // (of length `minDistance + 1`) is at distance `i` from the [starts] at
+    // position `i`, so only edges to the next BFS layer are followed, and
+    // only the closest [ends] are kept.
+    final distances = <Node<T>, int>{for (var s in starts) s: 0};
+    final queue = ListQueue<Node<T>>.of(distances.keys);
+    while (queue.isNotEmpty) {
+      var node = queue.removeFirst();
+      var distance = distances[node]! + 1;
+      for (var next in nextOf(node)) {
+        if (!distances.containsKey(next)) {
+          distances[next] = distance;
+          queue.add(next);
+        }
+      }
+    }
+
+    var minDistance = ends.map((e) => distances[e]).nonNulls.minOrNull;
+    if (minDistance == null) return [];
+
+    ends = ends.where((e) => distances[e] == minDistance).toList();
+
+    final allNextOf = nextOf;
+    nextOf = (node) {
+      var nextDistance = distances[node]! + 1;
+      return allNextOf(node).where((e) => distances[e] == nextDistance);
+    };
+  }
 
   // The reverse of [nextOf] over the [reached] nodes:
   final previousOf = <Node<T>, List<Node<T>>>{};
@@ -805,83 +856,120 @@ class Graph<T> implements NodeIO<T> {
   /// Scans and returns the paths from [root] to [target].
   /// Every path starts at [root] (that doesn't need to be a [roots] node).
   /// - [findAll]: if `true` returns all the paths, otherwise one of the shortest.
+  /// - [maxExpansion]: an optional cap for [findAll] (default: no cap).
   /// - See [GraphScanner.scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsFrom(
     T root,
     T target, {
     bool findAll = false,
-  }) {
-    var scanner = GraphScanner<T>(findAll: findAll);
-    return scanner.scanPathsFrom(root, NodeEquals(target), graph: this);
-  }
+    int? maxExpansion,
+  }) => GraphScanner<T>(findAll: findAll)._scanPathsFromMany(
+    [root],
+    NodeEquals(target),
+    graph: this,
+    maxExpansion: maxExpansion,
+  );
 
   /// Scans and returns the paths from [roots] to [targets].
   /// Every path starts at one of the [roots] (any node, not only the graph [roots]).
   /// - [findAll]: default `true` if there's more than one root or target.
+  /// - [maxExpansion]: an optional cap for [findAll] (default: no cap).
   /// - See [GraphScanner.scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsFromMany(
     List<T> roots,
     List<T> targets, {
     bool? findAll,
+    int? maxExpansion,
+  }) => _scanPathsFromMany(
+    roots,
+    targets,
+    findAll: findAll,
+    maxExpansion: maxExpansion,
+  );
+
+  Future<GraphScanResult<T>> _scanPathsFromMany(
+    List<T> roots,
+    List<T> targets, {
+    bool? findAll,
+    int? maxExpansion,
+    bool shortestOnly = false,
   }) {
     findAll ??= roots.length > 1 || targets.length > 1;
-    var scanner = GraphScanner<T>(findAll: findAll);
-    return scanner.scanPathsFromMany(
+    return GraphScanner<T>(findAll: findAll)._scanPathsFromMany(
       roots,
       NodeMatcher.eq(targets),
       graph: this,
+      maxExpansion: maxExpansion,
+      shortestOnly: shortestOnly,
     );
   }
 
   /// Scans and returns the paths from [roots] to [Node]s matching [targetMatcher].
   /// Every path starts at one of the [roots] (any node, not only the graph [roots]).
+  /// - [maxExpansion]: an optional cap for [findAll] (default: no cap).
   /// - See [GraphScanner.scanPathsFromMany].
   Future<GraphScanResult<T>> scanPathsMatching(
     List<T> roots,
     NodeMatcher<T> targetMatcher, {
     bool findAll = true,
-  }) {
-    var scanner = GraphScanner<T>(findAll: findAll);
-    return scanner.scanPathsFromMany(roots, targetMatcher, graph: this);
-  }
+    int? maxExpansion,
+  }) => GraphScanner<T>(findAll: findAll)._scanPathsFromMany(
+    roots,
+    targetMatcher,
+    graph: this,
+    maxExpansion: maxExpansion,
+  );
 
   /// Returns the shortest paths from [root] to [target].
-  /// - [findAll]: if `true` returns all the shortest paths
-  ///   (enumerating all the paths first), otherwise one of them (a BFS).
+  /// - [findAll]: if `true` returns all the shortest paths,
+  ///   otherwise one of them (a BFS).
+  ///   (Only the shortest paths are enumerated, not all the paths.)
   Future<List<List<Node<T>>>> shortestPathsFrom(
     T root,
     T target, {
     bool findAll = false,
   }) async {
-    var result = await scanPathsFrom(root, target, findAll: findAll);
+    var result = await GraphScanner<T>(findAll: findAll)._scanPathsFromMany(
+      [root],
+      NodeEquals(target),
+      graph: this,
+      shortestOnly: true,
+    );
     return result.paths.shortestPaths();
   }
 
   /// Returns the shortest paths from [roots] to [targets].
+  /// - See [shortestPathsFrom].
   Future<List<List<Node<T>>>> shortestPathsFromMany(
     List<T> roots,
     List<T> targets, {
     bool findAll = false,
   }) async {
-    var result = await scanPathsFromMany(roots, targets, findAll: findAll);
+    var result = await _scanPathsFromMany(
+      roots,
+      targets,
+      findAll: findAll,
+      shortestOnly: true,
+    );
     return result.paths.shortestPaths();
   }
 
   /// Returns the shortest paths from [roots] to [Nodes] matching [targetMatcher].
+  /// - See [shortestPathsFrom].
   Future<List<List<Node<T>>>> shortestPathsMatching(
     List<T> roots,
     NodeMatcher<T> targetMatcher, {
     bool findAll = true,
   }) async {
-    var result = await scanPathsMatching(
-      roots,
-      targetMatcher,
+    var result = await GraphScanner<T>(
       findAll: findAll,
-    );
+    )._scanPathsFromMany(roots, targetMatcher, graph: this, shortestOnly: true);
     return result.paths.shortestPaths();
   }
 
-  /// Returns all the paths from [roots] to [allLeaves];
+  /// Returns all the paths from [roots] to [allLeaves].
+  /// The number of paths can grow exponentially with the graph size:
+  /// see [scanPathsFromMany] (`maxExpansion`).
   Future<List<List<Node<T>>>> get allPaths async {
     var roots = this.roots.toListOfValues();
     var leaves = allLeaves.toListOfValues();
@@ -890,10 +978,19 @@ class Graph<T> implements NodeIO<T> {
     return result.paths;
   }
 
-  /// Returns all the shortest paths from [root] to [allLeaves].
+  /// Returns all the shortest paths from [roots] to [allLeaves].
+  /// (Only the shortest paths are enumerated, not all the paths.)
   Future<List<List<Node<T>>>> get shortestPaths async {
-    var paths = await allPaths;
-    return paths.shortestPaths();
+    var roots = this.roots.toListOfValues();
+    var leaves = allLeaves.toListOfValues();
+
+    var result = await _scanPathsFromMany(
+      roots,
+      leaves,
+      findAll: true,
+      shortestOnly: true,
+    );
+    return result.paths.shortestPaths();
   }
 
   /// Populates this graph with [entries].

@@ -15,6 +15,11 @@ Behaviour changes (results differ from 1.1.x where they were wrong):
     is expanded while enumerating paths; with a cap only a subset may be returned).
     Note that the number of paths can grow exponentially with the graph size.
   - `findAll: true` paths are grouped by target (in `Graph.targets` order) and sorted by length.
+  - `Graph.shortestPathsFrom` / `shortestPathsFromMany` / `shortestPathsMatching` / `shortestPaths`
+    with `findAll: true` enumerate only the shortest paths (following the BFS layers from
+    `from`), not all the paths, so they stay fast when there are many longer paths.
+  - `Graph.scanPathsFrom` / `scanPathsFromMany` / `scanPathsMatching`: new optional
+    `maxExpansion` (an explicit cap, forwarded to `GraphScanner`).
   - **Behaviour change:** `findAll: false` (and `shortestPathsFrom` with the default
     `findAll: false`) now returns a truly shortest path: the scan is a BFS from `from`
     that stops at the 1st target, and the path is the one walked by the BFS. Before, it
