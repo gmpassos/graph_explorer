@@ -368,9 +368,13 @@ class GraphWalker<T> {
       final node = step.node;
       final nodeValue = step.nodeValue;
 
+      // Don't count steps beyond `maxDepth` as processed: a node reached
+      // there first must still be processed when reached within `maxDepth`.
+      if (step.depth > maxDepth) continue;
+
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion && step.depth <= maxDepth) {
+      if (processCount <= maxExpansion) {
         if (processRoots || step.isNotRoot) {
           var ret = process(step);
 
@@ -442,9 +446,13 @@ class GraphWalker<T> {
       final node = step.node;
       final nodeValue = step.nodeValue;
 
+      // Don't count steps beyond `maxDepth` as processed: a node reached
+      // there first must still be processed when reached within `maxDepth`.
+      if (step.depth > maxDepth) continue;
+
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion && step.depth <= maxDepth) {
+      if (processCount <= maxExpansion) {
         if (processRoots || step.isNotRoot) {
           var ret = await process(step);
 
@@ -516,9 +524,13 @@ class GraphWalker<T> {
       final step = queue.removeFirst();
       final node = step.node;
 
+      // Don't count steps beyond `maxDepth` as processed: a node reached
+      // there first must still be processed when reached within `maxDepth`.
+      if (step.depth > maxDepth) continue;
+
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion && step.depth <= maxDepth) {
+      if (processCount <= maxExpansion) {
         if (processRoots || step.isNotRoot) {
           var ret = process(step);
 
@@ -606,9 +618,13 @@ class GraphWalker<T> {
       final step = queue.removeFirst();
       final node = step.node;
 
+      // Don't count steps beyond `maxDepth` as processed: a node reached
+      // there first must still be processed when reached within `maxDepth`.
+      if (step.depth > maxDepth) continue;
+
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion && step.depth <= maxDepth) {
+      if (processCount <= maxExpansion) {
         if (processRoots || step.isNotRoot) {
           var ret = await process(step);
 
@@ -720,9 +736,13 @@ class GraphWalker<T> {
       final step = queue.removeFirst();
       final node = step.node;
 
+      // Don't count steps beyond `maxDepth` as processed: a node reached
+      // there first must still be processed when reached within `maxDepth`.
+      if (step.depth > maxDepth) continue;
+
       var processCount = processed.increment(node);
 
-      if (processCount <= maxExpansion && step.depth <= maxDepth) {
+      if (processCount <= maxExpansion) {
         if (processRoots || step.isNotRoot) {
           walkOrder.add(node);
         }
